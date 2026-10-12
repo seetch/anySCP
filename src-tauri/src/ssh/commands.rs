@@ -625,10 +625,21 @@ pub async fn ssh_open_explorer_terminal(
 
 #[tauri::command]
 pub async fn open_explorer_terminal_window(
+    explorer_session_id: String,
     host_id: String,
     path: String,
     app_handle: AppHandle,
 ) -> Result<(), String> {
+    let label = explorer_terminal_window_label(&explorer_session_id)?;
+    if let Some(window) = app_handle.get_webview_window(&label) {
+        if window.is_visible().map_err(|e| e.to_string())? {
+            window.hide().map_err(|e| e.to_string())?;
+        } else {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
     fn encode(value: &str) -> String {
         value
             .bytes()
@@ -646,16 +657,41 @@ pub async fn open_explorer_terminal_window(
         encode(&host_id),
         encode(&path)
     );
-    tauri::WebviewWindowBuilder::new(
-        &app_handle,
-        format!("explorer-terminal-{}", uuid::Uuid::new_v4()),
-        tauri::WebviewUrl::App(route.into()),
-    )
-    .title("anySCP - SSH terminal")
-    .inner_size(900.0, 600.0)
-    .min_inner_size(450.0, 300.0)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let window =
+        tauri::WebviewWindowBuilder::new(&app_handle, label, tauri::WebviewUrl::App(route.into()))
+            .title("anySCP - SSH terminal")
+            .inner_size(900.0, 600.0)
+            .min_inner_size(450.0, 300.0)
+            .build()
+            .map_err(|e| e.to_string())?;
+    let hide_window = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // Closing the console hides it. Its SSH session belongs to the
+            // explorer tab and is released only when that tab is closed.
+            api.prevent_close();
+            let _ = hide_window.hide();
+        }
+    });
+    Ok(())
+}
+
+fn explorer_terminal_window_label(session_id: &str) -> Result<String, String> {
+    let id =
+        uuid::Uuid::parse_str(session_id).map_err(|_| "Invalid explorer session ID".to_string())?;
+    Ok(format!("explorer-terminal-{id}"))
+}
+
+#[tauri::command]
+pub async fn close_explorer_terminal_window(
+    explorer_session_id: String,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let label = explorer_terminal_window_label(&explorer_session_id)?;
+    if let Some(window) = app_handle.get_webview_window(&label) {
+        // Destroy bypasses the hide-on-close handler and triggers SSH cleanup.
+        window.destroy().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

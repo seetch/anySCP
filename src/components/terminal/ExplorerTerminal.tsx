@@ -45,7 +45,7 @@ export function ExplorerTerminal({ hostId, path, label = "SSH terminal", onClose
       if (!cancelled) setError(typeof err === "string" ? err : String((err as { message?: string })?.message ?? err));
     });
     return () => { cancelled = true; if (connectedId) release(connectedId); };
-  }, [hostId, path, label, attempt]);
+  }, [hostId, path, attempt]);
 
   const disconnected = status === "Disconnected" || status === "Error";
   return <div className="flex flex-col h-full min-h-0 bg-bg-base rounded-lg border border-border/60 overflow-hidden">

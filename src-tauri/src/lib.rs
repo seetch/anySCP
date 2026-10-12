@@ -269,6 +269,7 @@ pub fn run() {
             ssh::commands::ssh_split_session,
             ssh::commands::ssh_open_explorer_terminal,
             ssh::commands::open_explorer_terminal_window,
+            ssh::commands::close_explorer_terminal_window,
             ssh::commands::ssh_disconnect,
             ssh::commands::ssh_disconnect_bare,
             ssh::commands::ssh_send_input,
@@ -377,6 +378,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|handle, event| {
+            if matches!(&event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == "main") {
+                for (label, window) in handle.webview_windows() {
+                    if label.starts_with("explorer-terminal-") {
+                        let _ = window.destroy();
+                    }
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 handle.state::<Arc<mcp::McpState>>().stop();
             }

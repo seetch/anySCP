@@ -25,22 +25,40 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const s3Session = useS3Store((s) => s3SessionId ? s.sessions.get(s3SessionId) : null);
 
   const [consolePath, setConsolePath] = useState<string | null>(null);
+  const [consoleVisible, setConsoleVisible] = useState(false);
+  const consoleWindowOpened = useRef(false);
+  const consoleMounted = useRef(true);
   const [openingConsole, setOpeningConsole] = useState(false);
   const [consoleWidth, setConsoleWidth] = useState(42);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragCleanup = useRef<(() => void) | null>(null);
-  useEffect(() => () => dragCleanup.current?.(), []);
+  useEffect(() => {
+    consoleMounted.current = true;
+    return () => {
+      consoleMounted.current = false;
+      dragCleanup.current?.();
+      if (consoleWindowOpened.current && sftpSessionId) {
+        void invoke("close_explorer_terminal_window", { explorerSessionId: sftpSessionId }).catch(() => {});
+      }
+    };
+  }, [sftpSessionId]);
   const openConsole = async () => {
     if (!sftpSession?.hostId || openingConsole) return;
-    if (consolePath !== null) { setConsolePath(null); return; }
+    if (consolePath !== null) { setConsoleVisible((visible) => !visible); return; }
     setOpeningConsole(true);
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const appWindow = getCurrentWindow();
-      if (await appWindow.isMaximized() || await appWindow.isFullscreen()) {
+      if (!consoleWindowOpened.current && (await appWindow.isMaximized() || await appWindow.isFullscreen())) {
+        if (!consoleMounted.current) return;
         setConsolePath(sftpSession.currentPath);
+        setConsoleVisible(true);
       } else {
-        await invoke("open_explorer_terminal_window", { hostId: sftpSession.hostId, path: sftpSession.currentPath });
+        await invoke("open_explorer_terminal_window", { explorerSessionId: sftpSessionId, hostId: sftpSession.hostId, path: sftpSession.currentPath });
+        consoleWindowOpened.current = true;
+        if (!consoleMounted.current) {
+          await invoke("close_explorer_terminal_window", { explorerSessionId: sftpSessionId });
+        }
       }
     } catch (error) {
       toast.error(`Unable to open SSH terminal: ${String(error)}`);
@@ -83,7 +101,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
           <span className="text-[11px] font-mono truncate flex-1 min-w-0 text-text-primary leading-none" title={label}>
             {label}
           </span>
-          {sftpSession && <button data-testid="explorer-terminal" onClick={() => void openConsole()} disabled={!sftpSession.hostId || openingConsole} title={sftpSession.hostId ? "Open SSH terminal in current directory" : "Save this host to open its terminal"} aria-label="Open SSH terminal" className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-subtle disabled:opacity-40">
+          {sftpSession && <button data-testid="explorer-terminal" onClick={() => void openConsole()} disabled={!sftpSession.hostId || openingConsole} title={sftpSession.hostId ? consolePath !== null ? consoleVisible ? "Hide SSH terminal" : "Show SSH terminal" : consoleWindowOpened.current ? "Show/hide SSH terminal" : "Open SSH terminal in current directory" : "Save this host to open its terminal"} aria-label="Open SSH terminal" aria-pressed={consolePath !== null ? consoleVisible : undefined} className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-subtle disabled:opacity-40">
             {openingConsole ? <Loader2 size={15} className="animate-spin" /> : <TerminalSquare size={15} />}
           </button>}
         </div>
@@ -98,14 +116,14 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
         </div>
       </div>
       {consolePath !== null && sftpSession?.hostId && <>
-        <div role="separator" aria-label="Resize SSH terminal" aria-orientation="vertical" aria-valuenow={Math.round(consoleWidth)} aria-valuemin={25} aria-valuemax={65} tabIndex={0} onPointerDown={resizeConsole} onKeyDown={(e) => {
+        {consoleVisible && <div role="separator" aria-label="Resize SSH terminal" aria-orientation="vertical" aria-valuenow={Math.round(consoleWidth)} aria-valuemin={25} aria-valuemax={65} tabIndex={0} onPointerDown={resizeConsole} onKeyDown={(e) => {
           if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
             e.preventDefault();
             setConsoleWidth((v) => Math.max(25, Math.min(65, v + (e.key === "ArrowLeft" ? 2 : -2))));
           }
-        }} className="w-2 shrink-0 cursor-col-resize hover:bg-accent/20 focus-visible:bg-accent/20 rounded" />
-        <div className="shrink-0 min-w-0 h-full" style={{ width: `${consoleWidth}%` }}>
-          <ExplorerTerminal hostId={sftpSession.hostId} path={consolePath} label={baseLabel} onClose={() => setConsolePath(null)} />
+        }} className="w-2 shrink-0 cursor-col-resize hover:bg-accent/20 focus-visible:bg-accent/20 rounded" />}
+        <div className="shrink-0 min-w-0 h-full" style={{ width: `${consoleWidth}%`, display: consoleVisible ? undefined : "none" }} aria-hidden={!consoleVisible}>
+          <ExplorerTerminal hostId={sftpSession.hostId} path={consolePath} label={baseLabel} onClose={() => setConsoleVisible(false)} />
         </div>
       </>}
     </div>
