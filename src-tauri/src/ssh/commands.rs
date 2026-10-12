@@ -608,7 +608,7 @@ fn resolve_auth_method(host_id: &str, auth_type: &str, key_path: Option<String>)
 ///
 /// A missing jump host surfaces as a clear `"tunnel host ... not found"` error
 /// rather than the generic not-found message used for the top-level host.
-fn build_host_config_blocking(
+pub(crate) fn build_host_config_blocking(
     host_id: &str,
     db: &HostDb,
     visited: &mut Vec<String>,

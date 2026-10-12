@@ -3,6 +3,7 @@ mod backup;
 mod db;
 mod editors;
 mod import;
+mod mcp;
 mod portforward;
 mod s3;
 mod scp;
@@ -162,7 +163,11 @@ pub fn run() {
                 .build()
                 .map_err(|e| format!("failed to create main window: {e}"))?;
 
-            app.manage(Arc::new(host_db));
+            let host_db = Arc::new(host_db);
+            let mcp_state = mcp::McpState::new(host_db.clone())?;
+            app.manage(mcp_state.clone());
+            tauri::async_runtime::spawn(mcp_state.start_saved());
+            app.manage(host_db);
 
             // SftpManager must be created inside setup so it can be shared with
             // TransferManager, which also needs the AppHandle.
@@ -357,9 +362,19 @@ pub fn run() {
             snippets::commands::snippet_execute,
             // Build info
             is_release_build,
+            mcp::mcp_status,
+            mcp::mcp_configure,
+            mcp::mcp_rotate_token,
+            mcp::mcp_client_config,
+            mcp::mcp_install_client,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                handle.state::<Arc<mcp::McpState>>().stop();
+            }
+        });
 }
 
 #[cfg(test)]

@@ -128,6 +128,18 @@ AnySCP is a free, open-source desktop application that combines an SSH terminal,
 - Fully offline -- no internet connection required after installation
 - Open source -- audit the code yourself
 
+### MCP for Claude Code and Codex
+
+Open **Settings → MCP & AI clients**, select the SSH profiles you want to expose, enable the server, and click **Apply settings**. The local Streamable HTTP endpoint defaults to `http://127.0.0.1:4769/mcp` and is available while anySCP is running.
+
+- Read-only tools: `list_connections`, `list_files`, `read_file`, and `stat_file`.
+- Enable **Allow commands and file changes** to also expose `run_command`, `write_file`, `create_directory`, `rename_file`, and `delete_file`.
+- Passwords and private keys remain in the Rust backend. The server requires a separate MCP bearer key stored in the system keychain and only listens on localhost.
+- **Connect Claude Code** and **Connect Codex** add the `anyscp` MCP entry to each client's user configuration. Other settings and MCP servers are preserved; existing configuration is backed up before replacement. Start a new client session afterwards.
+- **Copy config** and **Show manual configuration** provide configurations for manual setup. Reconnect clients after changing the port or replacing the connection key.
+
+Remote text files and command output are limited to 512 KiB. Commands default to a 30-second timeout (maximum 90 seconds). File tools use SFTP; saved ProxyJump connections are supported. Existing files are preserved by `write_file` unless `overwrite` is explicitly true. `delete_file` removes individual files, not recursive directories.
+
 ## 📸 Screenshots
 
 |                Connection Manager                |                SSH Terminal                |

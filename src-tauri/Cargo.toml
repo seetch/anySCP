@@ -95,6 +95,12 @@ flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dirs = "6"
 
+# Local MCP HTTP transport and client configuration editing.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+toml_edit = "0.25"
+
 [dev-dependencies]
 tempfile = "3"
 

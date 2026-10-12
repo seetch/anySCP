@@ -4,6 +4,7 @@ import { ModalBackdrop } from "../shared/ModalBackdrop";
 import { useSettingsStore } from "../../stores/settings-store";
 import { CustomSelect, type SelectOption } from "../shared/CustomSelect";
 import { useUpdaterStore } from "../../stores/updater-store";
+import { McpSettings } from "./McpSettings";
 import { toast } from "../../stores/toast-store";
 import { RefreshCw, CheckCircle2, AlertCircle, Palette, SquareTerminal, ArrowUpDown, Info, ExternalLink, Check, FileCode, Plus, Trash2, FolderOpen, Star, Search, Database, Download, Upload, ShieldCheck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -47,7 +48,7 @@ const REPO_URL = "https://github.com/macnev2013/anySCP";
 // Each settings category is a section here. To add a new category, add an entry
 // to SECTIONS, a description, and render its content in <SectionContent />.
 
-type SectionId = "appearance" | "terminal" | "explorer" | "transfers" | "editors" | "data" | "about";
+type SectionId = "appearance" | "terminal" | "explorer" | "transfers" | "editors" | "data" | "mcp" | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
@@ -56,6 +57,7 @@ const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "transfers", label: "Transfers", icon: ArrowUpDown },
   { id: "editors", label: "Editors", icon: FileCode },
   { id: "data", label: "Data", icon: Database },
+  { id: "mcp", label: "MCP & AI clients", icon: ShieldCheck },
   { id: "about", label: "About & Updates", icon: Info },
 ];
 
@@ -66,6 +68,7 @@ const SECTION_DESCRIPTIONS: Record<SectionId, string> = {
   transfers: "Control how files are transferred.",
   editors: "Editors used by “Edit” / “Open With” in the file browser.",
   data: "Back up, restore, and reset your data.",
+  mcp: "Connect Claude Code and Codex to your SSH servers.",
   about: "App information, links, and updates.",
 };
 
@@ -158,6 +161,8 @@ function SectionContent({ section }: { section: SectionId }) {
       return <EditorsSettings />;
     case "data":
       return <DataSettings />;
+    case "mcp":
+      return <McpSettings />;
     case "about":
       return <AboutSettings />;
   }
