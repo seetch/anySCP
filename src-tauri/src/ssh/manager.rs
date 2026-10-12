@@ -108,22 +108,7 @@ impl SshManager {
             },
         );
 
-        let keepalive_secs = config.keep_alive_interval.unwrap_or(0) as u64;
-        let russh_config = Arc::new(client::Config {
-            // Send SSH keepalive probes rather than arming an inactivity GC timer.
-            // `inactivity_timeout` only tears the session down after a quiet
-            // window (and sends nothing to prevent it), which would also collapse
-            // any ProxyJump tunnel beneath an idle session. `keepalive_interval`
-            // proactively keeps the connection — and the tunnel — alive, while
-            // `keepalive_max` unanswered probes still detect a genuinely dead peer.
-            keepalive_interval: if keepalive_secs > 0 {
-                Some(std::time::Duration::from_secs(keepalive_secs))
-            } else {
-                None // No keepalive — connection stays alive until explicitly closed
-            },
-            keepalive_max: 3,
-            ..Default::default()
-        });
+        let russh_config = Arc::new(Self::connection_config(&config));
 
         // Establish the connection — directly or tunnelled through a ProxyJump
         // chain. The jump handles must outlive the target session, so they are
@@ -187,10 +172,7 @@ impl SshManager {
             .as_ref()
             .map(|id| self.register_pending(id.clone()));
 
-        let russh_config = Arc::new(client::Config {
-            inactivity_timeout: None, // SFTP connections stay alive indefinitely
-            ..Default::default()
-        });
+        let russh_config = Arc::new(Self::connection_config(&config));
 
         // Establish the connection — directly or tunnelled through a ProxyJump —
         // racing against the cancellation token so the user can abort mid-handshake.
@@ -221,6 +203,21 @@ impl SshManager {
         );
 
         Ok(session_id)
+    }
+
+    fn connection_config(config: &HostConfig) -> client::Config {
+        // Existing profiles default to zero. Use probes for them too, keeping
+        // idle SFTP connections and their ProxyJump tunnels open.
+        let seconds = config
+            .keep_alive_interval
+            .filter(|value| *value > 0)
+            .unwrap_or(30);
+        client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: Some(std::time::Duration::from_secs(seconds as u64)),
+            keepalive_max: 3,
+            ..Default::default()
+        }
     }
 
     /// Establish a connected + authenticated russh handle for `config`, returning
@@ -386,6 +383,10 @@ impl SshManager {
         Err(SshError::SessionNotFound(session_id.to_string()))
     }
 
+    pub fn is_bare_connection(&self, id: &str) -> bool {
+        self.bare_handles.contains_key(id)
+    }
+
     /// Open a new PTY channel on the same connection as an existing session.
     /// Returns the new session ID.
     pub async fn split_session(
@@ -494,6 +495,29 @@ impl SshManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_connections_use_keepalive_instead_of_an_inactivity_timer() {
+        let mut host: HostConfig = serde_json::from_value(serde_json::json!({
+            "host":"example.test", "port":22, "username":"user",
+            "auth_method":{"type":"password", "password":""}
+        }))
+        .unwrap();
+        for interval in [None, Some(0), Some(10)] {
+            host.keep_alive_interval = interval;
+            let config = SshManager::connection_config(&host);
+            assert_eq!(
+                config.keepalive_interval,
+                Some(std::time::Duration::from_secs(if interval == Some(10) {
+                    10
+                } else {
+                    30
+                }))
+            );
+            assert_eq!(config.keepalive_max, 3);
+            assert_eq!(config.inactivity_timeout, None);
+        }
+    }
 
     /// Cancelling an attempt ID that was never registered (or whose attempt
     /// already settled) must report that nothing was found.

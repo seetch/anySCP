@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const MAX_CONTENT: usize = 512 * 1024;
+pub(super) const MAX_FILE_SIZE: usize = 100 * 1024 * 1024;
+const MAX_COMMAND_OUTPUT: usize = 512 * 1024;
 const WRITE_TOOLS: [&str; 5] = [
     "run_command",
     "write_file",
@@ -25,10 +26,10 @@ pub fn definitions(writes: bool) -> Vec<Value> {
     let specs = [
         ("list_connections", "List allowed saved SSH servers, their IDs and connection notes. Passwords and private keys are never returned.", json!({}), json!([])),
         ("list_files", "List a remote directory through SFTP, up to 1000 entries. Defaults to the remote home directory.", json!({"host_id":host,"path":path}), json!(["host_id"])),
-        ("read_file", "Read a remote UTF-8 text file, up to 512 KiB.", json!({"host_id":host,"path":path}), json!(["host_id","path"])),
+        ("read_file", "Read a remote UTF-8 text file, up to 100 MiB.", json!({"host_id":host,"path":path}), json!(["host_id","path"])),
         ("stat_file", "Get remote file size, type and modification time.", json!({"host_id":host,"path":path}), json!(["host_id","path"])),
         ("run_command", "Execute a shell command on an allowed SSH server and return stdout, stderr and exit code. Requires write/command access. Output is limited to 512 KiB; timeout defaults to 30 seconds.", json!({"host_id":host,"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":90}}), json!(["host_id","command"])),
-        ("write_file", "Write a UTF-8 remote file (maximum 512 KiB). Existing files are preserved unless overwrite is explicitly true.", json!({"host_id":host,"path":path,"content":{"type":"string"},"overwrite":{"type":"boolean","default":false}}), json!(["host_id","path","content"])),
+        ("write_file", "Write a UTF-8 remote file (maximum 100 MiB). Existing files are preserved unless overwrite is explicitly true.", json!({"host_id":host,"path":path,"content":{"type":"string"},"overwrite":{"type":"boolean","default":false}}), json!(["host_id","path","content"])),
         ("create_directory", "Create a remote directory. Parent directories must already exist.", json!({"host_id":host,"path":path}), json!(["host_id","path"])),
         ("rename_file", "Rename a remote file or directory using SFTP.", json!({"host_id":host,"path":path,"new_path":path}), json!(["host_id","path","new_path"])),
         ("delete_file", "Delete a single remote file. Does not delete directories recursively.", json!({"host_id":host,"path":path}), json!(["host_id","path"])),
@@ -51,6 +52,14 @@ fn text<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
         ));
     }
     Ok(value)
+}
+
+fn validate_file_size(bytes: usize) -> Result<(), String> {
+    if bytes > MAX_FILE_SIZE {
+        Err("File exceeds 100 MiB".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn authorize(config: &McpConfig, name: &str, arguments: &Value) -> Result<(), String> {
@@ -92,6 +101,9 @@ fn authorize(config: &McpConfig, name: &str, arguments: &Value) -> Result<(), St
         if !config.allowed_host_ids.iter().any(|allowed| allowed == id) {
             return Err("This server is not allowed in anySCP MCP settings".into());
         }
+    }
+    if name == "write_file" {
+        validate_file_size(arguments["content"].as_str().unwrap_or_default().len())?;
     }
     Ok(())
 }
@@ -139,7 +151,7 @@ pub async fn call(
             .unwrap_or_else(|_| Err("Command timed out; the SSH channel was closed".to_string()))
     } else {
         tokio::time::timeout(
-            Duration::from_secs(45),
+            Duration::from_secs(90),
             file_operation(&handle, name, &arguments),
         )
         .await
@@ -177,7 +189,7 @@ async fn run_command(
             ChannelMsg::Close => break,
             _ => {}
         }
-        if stdout.len() + stderr.len() > MAX_CONTENT {
+        if stdout.len() + stderr.len() > MAX_COMMAND_OUTPUT {
             let _ = channel.close().await;
             return Err("Command output exceeded 512 KiB; the channel was closed".into());
         }
@@ -240,13 +252,11 @@ async fn operate(sftp: &SftpSession, name: &str, arguments: &Value) -> Result<Va
         "read_file" => {
             let file = sftp.open(&path).await.map_err(|e| e.to_string())?;
             let mut data = Vec::new();
-            file.take((MAX_CONTENT + 1) as u64)
+            file.take((MAX_FILE_SIZE + 1) as u64)
                 .read_to_end(&mut data)
                 .await
                 .map_err(|e| e.to_string())?;
-            if data.len() > MAX_CONTENT {
-                return Err("File exceeds 512 KiB".into());
-            }
+            validate_file_size(data.len())?;
             let content = String::from_utf8(data).map_err(|_| "File is not UTF-8 text")?;
             Ok(json!({"path":path,"content":content}))
         }
@@ -265,9 +275,7 @@ async fn operate(sftp: &SftpSession, name: &str, arguments: &Value) -> Result<Va
             let content = arguments["content"]
                 .as_str()
                 .ok_or("content must be a string")?;
-            if content.len() > MAX_CONTENT {
-                return Err("Content exceeds 512 KiB".into());
-            }
+            validate_file_size(content.len())?;
             let overwrite = arguments["overwrite"].as_bool().unwrap_or(false);
             let flags = OpenFlags::CREATE
                 | OpenFlags::WRITE
@@ -308,6 +316,14 @@ async fn operate(sftp: &SftpSession, name: &str, arguments: &Value) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_limit_is_inclusive_and_independent_of_command_output() {
+        assert!(validate_file_size(MAX_FILE_SIZE).is_ok());
+        assert!(validate_file_size(MAX_FILE_SIZE + 1).is_err());
+        assert_eq!(MAX_FILE_SIZE, 100 * 1024 * 1024);
+        assert_eq!(MAX_COMMAND_OUTPUT, 512 * 1024);
+    }
 
     #[test]
     fn read_only_mode_and_host_allowlist_are_enforced_before_io() {

@@ -9,6 +9,10 @@ import {
   Home,
   Loader2,
   Shield,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  History,
 } from "lucide-react";
 import type { FileSystemProvider } from "../../types/explorer";
 
@@ -35,6 +39,9 @@ interface ExplorerToolbarProps {
   sudoMode?: boolean;
   sudoBusy?: boolean;
   onToggleSudo?: () => void;
+  onBack?: () => void;
+  onForward?: () => void;
+  recentPaths?: string[];
 }
 
 // cache icons so they render once
@@ -72,7 +79,7 @@ function normalizePath(
   providerType: FileSystemProvider["type"],
   raw: string,
 ): string {
-  const trimmed = raw.trim();
+  const trimmed = raw.trim().replace(/^(["'])(.*)\1$/, "$2");
   if (providerType === "sftp") {
     const stripped = trimmed.replace(/\/+$/, "");
     if (stripped === "") return "/";
@@ -97,13 +104,32 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
   sudoMode,
   sudoBusy,
   onToggleSudo,
+  onBack,
+  onForward,
+  recentPaths = [],
 }: ExplorerToolbarProps) {
   const caps = provider.capabilities;
   const providerType = provider.type;
 
+  const [showHistory, setShowHistory] = useState(false);
+  const historyRef = useRef<HTMLDivElement>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [draftPath, setDraftPath] = useState(currentPath);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!showHistory) return;
+    const close = (event: PointerEvent) => {
+      if (!historyRef.current?.contains(event.target as Node)) setShowHistory(false);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setShowHistory(false); };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [showHistory]);
 
   // Focus + select only when editing begins — re-running on a currentPath
   // change mid-edit would stomp the user's cursor/selection
@@ -156,6 +182,18 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
 
   return (
     <div className="flex items-center h-10 px-2 border-b border-border bg-bg-surface shrink-0 gap-1 no-select">
+      {providerType === "sftp" && <>
+        <button data-testid="explorer-back" onClick={onBack} disabled={loading || !onBack} title="Back (Alt+Left)" aria-label="Go back" className={ICON_BTN_CLASS}><ArrowLeft size={15} /></button>
+        <button data-testid="explorer-forward" onClick={onForward} disabled={loading || !onForward} title="Forward (Alt+Right)" aria-label="Go forward" className={ICON_BTN_CLASS}><ArrowRight size={15} /></button>
+        <button data-testid="explorer-up" onClick={() => onNavigate(provider.parentPath(currentPath))} disabled={loading || isAtRoot} title="Parent directory (Alt+Up)" aria-label="Go to parent directory" className={ICON_BTN_CLASS}><ArrowUp size={15} /></button>
+        <div className="relative shrink-0" ref={historyRef}>
+          <button data-testid="explorer-history" onClick={() => setShowHistory((v) => !v)} disabled={loading || recentPaths.length === 0} title="Recent directories" aria-label="Recent directories" aria-expanded={showHistory} className={ICON_BTN_CLASS}><History size={15} /></button>
+          {showHistory && <div className="absolute top-full left-0 mt-1 z-40 min-w-64 max-w-96 max-h-64 overflow-auto rounded-md border border-border bg-bg-surface p-1 shadow-lg">
+            <p className="px-2 py-1 text-text-muted text-[length:var(--text-xs)]">Recent directories</p>
+            {recentPaths.map((path) => <button key={path} title={path} className="block w-full truncate text-left px-2 py-1.5 rounded text-[length:var(--text-sm)] text-text-primary hover:bg-bg-subtle" onClick={() => { setShowHistory(false); onNavigate(path); }}>{path}</button>)}
+          </div>}
+        </div>
+      </>}
       {/* Home button */}
       <button
         data-testid="explorer-home"
@@ -168,6 +206,7 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
         <Home size={15} strokeWidth={1.8} aria-hidden="true" />
       </button>
 
+      {recentPaths.length > 0 && <datalist id={`explorer-paths-${provider.sessionId}`}>{recentPaths.map((path) => <option key={path} value={path} />)}</datalist>}
       {/* Breadcrumb path */}
       {isEditing ? (
         <input
@@ -178,6 +217,7 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
           onChange={(e) => setDraftPath(e.target.value)}
           onBlur={commitEdit}
           onKeyDown={handleInputKeyDown}
+          list={recentPaths.length ? `explorer-paths-${provider.sessionId}` : undefined}
           spellCheck={false}
           autoCorrect="off"
           autoCapitalize="off"

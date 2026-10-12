@@ -778,7 +778,7 @@ export function HostEditModal() {
                     min={0}
                     value={form.keepAliveInterval}
                     onChange={(e) => setField("keepAliveInterval", e.target.value)}
-                    placeholder="60"
+                    placeholder="30 (default)"
                     disabled={isBusy}
                     className={`${inputClass} font-mono`}
                   />

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Download, Loader2 } from "lucide-react";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useTabStore } from "../../stores/tab-store";
 import type { SftpEntry } from "../../types";
@@ -30,11 +30,15 @@ interface ExplorerViewProps {
 }
 
 export function ExplorerView({ sessionId, transport = "sftp", isActive = true }: ExplorerViewProps) {
+  const viewRef = useRef<HTMLDivElement>(null);
+  const listingSequence = useRef(0);
+  const reconnecting = useRef<Promise<string> | null>(null);
   const session = useSftpStore((s) => s.sessions.get(sessionId));
   const setEntries = useSftpStore((s) => s.setEntries);
   const setLoading = useSftpStore((s) => s.setLoading);
   const setError = useSftpStore((s) => s.setError);
   const setSort = useSftpStore((s) => s.setSort);
+  const recentDirectories = useSftpStore((s) => s.recentDirectories);
   const clipboard = useSftpStore((s) => s.clipboard);
   const setClipboard = useSftpStore((s) => s.setClipboard);
   const sudoMode = useSftpStore((s) => s.sessions.get(sessionId)?.sudoMode ?? false);
@@ -60,6 +64,15 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   // and (b) the OS drag re-entering our own window drop listener and
   // re-uploading the just-staged temp files (a self-drop).
   const isDraggingOut = useRef(false);
+  const [preparingDrag, setPreparingDrag] = useState(false);
+  const [preparedDrag, setPreparedDrag] = useState<{ id: string; paths: string[] } | null>(null);
+  const preparedDragRef = useRef(preparedDrag);
+  preparedDragRef.current = preparedDrag;
+  const dragMounted = useRef(true);
+  useEffect(() => {
+    dragMounted.current = true;
+    return () => { dragMounted.current = false; };
+  }, []);
   const currentPathRef = useRef(session?.currentPath ?? "/");
   currentPathRef.current = session?.currentPath ?? "/";
 
@@ -99,12 +112,13 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   // we divide by devicePixelRatio ONLY on Windows; doing so elsewhere would
   // halve the coordinate on HiDPI/Retina and hit the wrong row.
   const resolveDropDir = useCallback(
-    (position?: { x: number; y: number }): string => {
+    (position?: { x: number; y: number }): string | null => {
       const base = currentPathRef.current;
       if (!position) return base;
       const scale = isWindowsWebview() ? window.devicePixelRatio || 1 : 1;
       const el = document.elementFromPoint(position.x / scale, position.y / scale);
-      const row = el?.closest("[data-entry-row]") as HTMLElement | null;
+      if (!el || !viewRef.current?.contains(el)) return null;
+      const row = el.closest("[data-entry-row]") as HTMLElement | null;
       if (row && row.dataset.entryType === "Directory") {
         const name = row.dataset.entryName;
         const entries = useSftpStore.getState().sessions.get(sessionId)?.entries ?? [];
@@ -153,8 +167,9 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
           const type = event.payload?.type;
           if (type === "enter" || type === "over") {
-            setIsDragOver(true);
-            setDropTargetDir(resolveDropDir(event.payload?.position));
+            const target = resolveDropDir(event.payload?.position);
+            setIsDragOver(target !== null);
+            setDropTargetDir(target);
           } else if (type === "drop") {
             setIsDragOver(false);
             setDropTargetDir(null);
@@ -165,20 +180,21 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
             // cleared by the time the OS delivered the drop.
             if (paths.some((p) => p.includes(DRAGOUT_STAGING_SEGMENT))) return;
             if (isProcessingDrop.current || paths.length === 0) return;
+            const remoteDir = resolveDropDir(event.payload?.position);
+            if (remoteDir === null) return;
             isProcessingDrop.current = true;
 
-            const remoteDir = resolveDropDir(event.payload?.position);
-
             void (async () => {
-              // Pre-flight overwrite check. Best-effort: if the target listing
-              // can't be fetched (e.g. permissions) we skip the prompt and let
-              // the upload proceed — a real failure surfaces in the popover.
+              // Resolve collisions before enqueueing; a failed listing must
+              // not silently turn an upload into an overwrite.
               let conflicts: string[] = [];
               try {
                 const existing = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path: remoteDir });
                 conflicts = conflictingNames(paths, new Set(existing.map((e) => e.name)));
-              } catch {
-                // Skip the pre-check; proceed to upload.
+              } catch (error) {
+                isProcessingDrop.current = false;
+                toast.error(`Unable to check upload destination: ${errorMessage(error)}. Refresh the directory and try again.`);
+                return;
               }
 
               if (conflicts.length > 0) {
@@ -189,7 +205,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
               }
 
               await uploadDropped(paths, remoteDir);
-              setTimeout(() => { isProcessingDrop.current = false; }, 500);
+              isProcessingDrop.current = false;
             })();
           } else {
             setIsDragOver(false);
@@ -246,16 +262,61 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
   const loadDirectory = useCallback(
     async (path: string) => {
+      const sequence = ++listingSequence.current;
       setLoading(sessionId, true);
       try {
-        const entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
-        setEntries(sessionId, path, entries);
-      } catch (err: unknown) {
-        setError(sessionId, errorMessage(err, "Failed to list directory"));
+        let entries: SftpEntry[];
+        try {
+          entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
+        } catch (error) {
+          const message = errorMessage(error).toLowerCase();
+          if (transport !== "sftp" || !/disconnect|closed|not connected|session.*not found|broken pipe|connection.*lost|connection.*reset|timeout|timed out|senderror|recverror|unexpected eof|connection aborted|notconnected/.test(message)) throw error;
+          const current = useSftpStore.getState().sessions.get(sessionId);
+          if (!current) return;
+          if (!reconnecting.current) {
+            reconnecting.current = invoke<string>("sftp_reconnect", { sftpSessionId: sessionId, hostId: current.hostId, useSudo: current.sudoMode });
+          }
+          try {
+            const sshId = await reconnecting.current;
+            useSftpStore.getState().setSshSession(sessionId, sshId);
+          } finally {
+            reconnecting.current = null;
+          }
+          entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
+        }
+        if (sequence === listingSequence.current) setEntries(sessionId, path, entries);
+      } catch (err) {
+        if (sequence === listingSequence.current) setError(sessionId, errorMessage(err, "Failed to list directory"));
       }
     },
     [sessionId, transport, setLoading, setEntries, setError],
   );
+
+  const navigateHistory = useCallback((direction: -1 | 1) => {
+    const current = useSftpStore.getState().sessions.get(sessionId);
+    if (!current || current.loading) return;
+    const index = current.historyIndex + direction;
+    const path = current.history[index];
+    if (!path) return;
+    useSftpStore.getState().setHistoryTarget(sessionId, index);
+    void loadDirectory(path);
+  }, [sessionId, loadDirectory]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (!event.altKey || session?.loading || (event.target as HTMLElement)?.closest?.(".xterm")) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        navigateHistory(event.key === "ArrowLeft" ? -1 : 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        void loadDirectory(provider.parentPath(currentPathRef.current));
+      }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [isActive, navigateHistory, loadDirectory, provider, session?.loading]);
 
   // ─── Sudo toggle (SFTP only) ──────────────────────────────────────────────
 
@@ -304,8 +365,13 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   // remount), otherwise land in the host's configured start directory and
   // fall back to the server home dir, then root.
   useEffect(() => {
+    let aborted = false;
+    const sequence = ++listingSequence.current;
+    setLoading(sessionId, true);
     (async () => {
       const sessionState = useSftpStore.getState().sessions.get(sessionId);
+      if (sessionState?.hostId) await useSftpStore.getState().loadRecentDirectories(sessionState.hostId);
+      if (aborted || sequence !== listingSequence.current) return;
       const preserved = sessionState?.currentPath;
       if (preserved && preserved !== "/") {
         await loadDirectory(preserved);
@@ -317,9 +383,10 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
       // propagates failure instead of surfacing it, so a missing start
       // directory transparently falls through to the home dir.
       const tryList = async (path: string): Promise<boolean> => {
+        if (aborted || sequence !== listingSequence.current) return true;
         try {
           const entries = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path });
-          setEntries(sessionId, path, entries);
+          if (!aborted && sequence === listingSequence.current) setEntries(sessionId, path, entries);
           return true;
         } catch {
           return false;
@@ -358,8 +425,9 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
       // 2. Server home directory. 3. Root.
       const home = await resolveHome();
       if (home && (await tryList(home))) return;
-      await loadDirectory("/");
+      if (!aborted && sequence === listingSequence.current) await loadDirectory("/");
     })();
+    return () => { aborted = true; ++listingSequence.current; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, transport]);
 
@@ -425,55 +493,62 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
   // ─── Drag-out (Explorer → OS desktop/Finder) ──────────────────────────────
   //
-  // The whole drag-out runs in the backend `sftp_drag_out` command: it stages
-  // every selected entry to a private temp dir (files directly, folders
-  // recursively — fixing the old "only one file" bug), then drives the native
-  // OS drag with those real local paths and resolves once the drag ends. We
-  // must stage *before* the drag because the OS drag API needs concrete file
-  // handles up front — see the drag-out comment in ExplorerFileTable for why
-  // HTML5 DataTransfer can't do this in a webview.
-  //
-  // SCP has no `drag_out` command, so drag-out is wired for SFTP only (see the
-  // `onDragOut` prop below); SCP sessions keep the in-app move drag.
-  //
-  // Known limitation: staging a very large folder blocks until every byte is on
-  // disk (bounded by a backend size cap), so for big selections the drag may
-  // only begin after the mouse is released. The re-entrancy guard below stops a
-  // retry from re-downloading the same selection.
-  const handleDragOut = useCallback((entries: ExplorerEntry[]) => {
-    if (isDraggingOut.current) return; // a drag-out is already staging/dragging
+  const startPreparedDrag = useCallback(async (prepared: { id: string; paths: string[] }) => {
+    setPreparedDrag(null);
     isDraggingOut.current = true;
+    try {
+      const { dropped, count } = await explorerInvoke<DragOutResult>(transport, "start_drag_out", sessionId, { preparedId: prepared.id });
+      if (dropped && count > 0) toast.success(`Handed ${count} ${count === 1 ? "item" : "items"} to your file manager`);
+    } catch (error) {
+      toast.error(`Download drag failed: ${errorMessage(error)}`);
+    } finally {
+      isDraggingOut.current = false;
+    }
+  }, [sessionId, transport]);
+
+  const handleDragOut = useCallback((entries: ExplorerEntry[]) => {
+    if (isDraggingOut.current) return;
+    const paths = entries.map((entry) => entry.id);
+    const prepared = preparedDragRef.current;
+    if (prepared && JSON.stringify(prepared.paths) === JSON.stringify(paths)) {
+      void startPreparedDrag(prepared);
+      return;
+    }
+    isDraggingOut.current = true;
+    setPreparingDrag(true);
+    let pointerHeld = true;
+    const released = () => { pointerHeld = false; };
+    window.addEventListener("pointerup", released);
+    window.addEventListener("pointercancel", released);
+    // A release outside the webview might not deliver pointerup. Track the
+    // physical button state whenever the cursor returns instead.
+    const moved = (event: PointerEvent) => { if (!(event.buttons & 1)) pointerHeld = false; };
+    window.addEventListener("pointermove", moved);
+    const blurred = () => { pointerHeld = false; };
+    window.addEventListener("blur", blurred);
     void (async () => {
-      // Staging a large selection blocks before the OS drag can attach; show a
-      // "Preparing…" toast only if it's slow enough to notice, and clear it once
-      // the drag begins/ends.
-      let prepToast: string | null = null;
-      const prepTimer = setTimeout(() => {
-        prepToast = toast.info("Preparing download…");
-      }, 400);
       try {
-        const remotePaths = entries.map((en) => en.id);
-        const { dropped, count } = await explorerInvoke<DragOutResult>(
-          transport,
-          "drag_out",
-          sessionId,
-          { remotePaths },
-        );
-        // The OS copies asynchronously after the drop and gives no completion
-        // signal; the backend's drop result is the only success hook, so only
-        // confirm when the drag actually dropped (not when it was cancelled).
-        if (dropped && count > 0) {
-          toast.success(`Downloaded ${count} ${count === 1 ? "item" : "items"}`);
+        const id = await explorerInvoke<string>(transport, "prepare_drag_out", sessionId, { remotePaths: paths });
+        if (!dragMounted.current) return;
+        const result = { id, paths };
+        if (pointerHeld && document.hasFocus()) {
+          await startPreparedDrag(result);
+        } else {
+          setPreparedDrag(result);
+          toast.info("Files are ready. Drag the Ready download button to your file manager.");
         }
-      } catch (err) {
-        toast.error(`Download failed: ${errorMessage(err)}`);
+      } catch (error) {
+        if (dragMounted.current) toast.error(`Preparing download failed: ${errorMessage(error)}`);
       } finally {
-        clearTimeout(prepTimer);
-        if (prepToast) toast.dismiss(prepToast);
+        window.removeEventListener("pointerup", released);
+        window.removeEventListener("pointercancel", released);
+        window.removeEventListener("pointermove", moved);
+        window.removeEventListener("blur", blurred);
+        if (dragMounted.current) setPreparingDrag(false);
         isDraggingOut.current = false;
       }
     })();
-  }, [sessionId, transport]);
+  }, [sessionId, transport, startPreparedDrag]);
 
   // ─── Upload (dialog) ─────────────────────────────────────────────────────
 
@@ -766,13 +841,16 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   if (!session) return null;
 
   return (
-    <div className="flex flex-col h-full overflow-hidden relative">
+    <div ref={viewRef} className="flex flex-col h-full overflow-hidden relative">
       <ExplorerToolbar
         provider={provider}
         currentPath={session.currentPath}
         segments={segments}
         loading={session.loading}
         onNavigate={(path) => void loadDirectory(path)}
+        onBack={session.historyIndex > 0 ? () => navigateHistory(-1) : undefined}
+        onForward={session.historyIndex < session.history.length - 1 ? () => navigateHistory(1) : undefined}
+        recentPaths={session.hostId ? recentDirectories[session.hostId] ?? [] : session.history.slice().reverse()}
         onRefresh={() => void loadDirectory(session.currentPath)}
         onNewFile={() => setCreatingFile(true)}
         onNewFolder={() => setCreatingFolder(true)}
@@ -784,6 +862,14 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         onToggleSudo={transport === "sftp" && !isRoot ? () => void handleToggleSudo() : undefined}
       />
 
+      {(preparingDrag || preparedDrag) && <div className="flex items-center gap-2 px-3 py-2 bg-bg-surface border-b border-border text-text-secondary text-[length:var(--text-sm)]">
+        {preparingDrag ? <><Loader2 size={15} className="animate-spin" />Preparing files for download…</> : preparedDrag && <button data-testid="explorer-ready-download" className="flex items-center gap-2 px-2 py-1 rounded bg-bg-subtle hover:text-text-primary cursor-grab" title="Hold and drag this button to your file manager" onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          void startPreparedDrag(preparedDrag);
+        }}><Download size={15} />Ready download ({preparedDrag.paths.length}) - drag to your file manager</button>}
+      </div>}
+
       {/* Error banner */}
       {session.error && (
         <div
@@ -791,7 +877,8 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
           className="flex items-center gap-2.5 px-4 py-2.5 bg-status-error/10 border-b border-status-error/20 text-status-error"
         >
           <AlertCircle size={15} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-          <p className="text-[length:var(--text-sm)]">{session.error}</p>
+          <p className="text-[length:var(--text-sm)] flex-1">{session.error}</p>
+          <button disabled={session.loading} className="shrink-0 underline disabled:opacity-40" onClick={() => void loadDirectory(session.currentPath)}>Retry</button>
         </div>
       )}
 

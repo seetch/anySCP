@@ -138,7 +138,14 @@ Open **Settings → MCP & AI clients**, select the SSH profiles you want to expo
 - **Connect Claude Code** and **Connect Codex** add the `anyscp` MCP entry to each client's user configuration. Other settings and MCP servers are preserved; existing configuration is backed up before replacement. Start a new client session afterwards.
 - **Copy config** and **Show manual configuration** provide configurations for manual setup. Reconnect clients after changing the port or replacing the connection key.
 
-Remote text files and command output are limited to 512 KiB. Commands default to a 30-second timeout (maximum 90 seconds). File tools use SFTP; saved ProxyJump connections are supported. Existing files are preserved by `write_file` unless `overwrite` is explicitly true. `delete_file` removes individual files, not recursive directories.
+Remote UTF-8 text files are limited to 100 MiB (measured in bytes); command output remains limited to 512 KiB. File operations have a 90-second timeout. The HTTP request limit accounts for JSON escaping, with at most two requests processed concurrently. Commands default to a 30-second timeout (maximum 90 seconds). File tools use SFTP; saved ProxyJump connections are supported. Existing files are preserved by `write_file` unless `overwrite` is explicitly true. `delete_file` removes individual files, not recursive directories.
+
+The file browser sends SSH keepalive probes every 30 seconds by default (including SFTP-only and ProxyJump connections). Positive host-specific keepalive values override this interval. A lost SFTP channel is reopened when listing a directory; if necessary, saved profiles reconnect using the vault credentials. Writes are never automatically replayed.
+
+SFTP/SCP navigation includes Back, Forward, Parent and a recent-directory menu, with Alt+Left/Right/Up shortcuts. The last 20 visited directories are saved per host and suggested in the path field. The SSH terminal button opens an independent console in the current directory: a resizable right pane in a maximized/fullscreen window, otherwise a separate application window.
+
+Drop local files or folders on a remote directory to upload there, with an overwrite prompt. Drag remote selections out of the window, or use Ctrl/Cmd+drag, to download. If staging takes longer than the gesture, use the Ready download button to begin a fresh drag after the files finish downloading. Linux drag-out uses GTK directly, with escaped file URIs and data retained until the receiving application finishes. Desktop integration under Wayland still needs a manual check. The regular Download action remains available.
+
 
 ## 📸 Screenshots
 

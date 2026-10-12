@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 const SETTING: &str = "mcp_config";
 const TOKEN_ID: &str = "anyscp-mcp-api-token";
-const MAX_BODY: usize = 1024 * 1024;
+// JSON escaping can encode each content byte as six bytes (\u00xx).
+const MAX_BODY: usize = tools::MAX_FILE_SIZE * 6 + 1024 * 1024;
 const PROTOCOLS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -209,7 +210,7 @@ fn new_token() -> Result<String, String> {
 }
 
 async fn serve(listener: TcpListener, state: Arc<McpState>, cancel: CancellationToken) {
-    let permits = Arc::new(Semaphore::new(16));
+    let permits = Arc::new(Semaphore::new(2));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -218,7 +219,11 @@ async fn serve(listener: TcpListener, state: Arc<McpState>, cancel: Cancellation
             Some(_) = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
                 let (stream, _) = match accepted { Ok(value) => value, Err(_) => break };
-                let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
+                let permit = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = state.lifetime.cancelled() => break,
+                    permit = permits.clone().acquire_owned() => match permit { Ok(value) => value, Err(_) => break },
+                };
                 let state = state.clone();
                 let cancel = cancel.clone();
                 connections.spawn(async move {
@@ -232,7 +237,7 @@ async fn serve(listener: TcpListener, state: Arc<McpState>, cancel: Cancellation
                         .serve_connection(TokioIo::new(stream), service);
                     tokio::select! {
                         _ = cancel.cancelled() => {},
-                        _ = tokio::time::timeout(Duration::from_secs(130), connection) => {},
+                        _ = tokio::time::timeout(Duration::from_secs(145), connection) => {},
                     }
                 });
             }
@@ -418,6 +423,10 @@ async fn dispatch_message(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match tools::call(state.db.clone(), &config, name, arguments).await {
+                Ok(data) if name == "read_file" => {
+                    // Large text files must not be duplicated in the response.
+                    json!({"content":[{"type":"text","text":data.to_string()}],"isError":false})
+                }
                 Ok(data) => {
                     json!({"content":[{"type":"text","text":data.to_string()}],"structuredContent":data,"isError":false})
                 }

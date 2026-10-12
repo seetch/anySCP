@@ -80,7 +80,7 @@ pub struct HostConfig {
     pub auth_method: AuthMethod,
     /// Human-readable label shown in the UI tab.
     pub label: Option<String>,
-    /// Keepalive interval in seconds (overrides default 60s).
+    /// Keepalive interval in seconds (positive values override default 30s).
     pub keep_alive_interval: Option<u32>,
     /// Shell to request instead of the default login shell.
     pub default_shell: Option<String>,

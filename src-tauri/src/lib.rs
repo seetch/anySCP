@@ -208,6 +208,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // SFTP — session & filesystem
             sftp::commands::sftp_open,
+            sftp::commands::sftp_reconnect,
             sftp::commands::sftp_close,
             sftp::commands::sftp_list_dir,
             sftp::commands::sftp_home_dir,
@@ -223,6 +224,8 @@ pub fn run() {
             // SFTP — legacy direct transfers (kept for VS Code edit workflow)
             sftp::commands::sftp_download,
             sftp::commands::sftp_drag_out,
+            sftp::commands::sftp_prepare_drag_out,
+            sftp::commands::sftp_start_drag_out,
             sftp::commands::sftp_upload,
             sftp::commands::sftp_cancel_transfer,
             sftp::commands::sftp_edit_external,
@@ -264,7 +267,10 @@ pub fn run() {
             ssh::commands::ssh_connect,
             ssh::commands::ssh_cancel_connect,
             ssh::commands::ssh_split_session,
+            ssh::commands::ssh_open_explorer_terminal,
+            ssh::commands::open_explorer_terminal_window,
             ssh::commands::ssh_disconnect,
+            ssh::commands::ssh_disconnect_bare,
             ssh::commands::ssh_send_input,
             ssh::commands::ssh_resize_pty,
             ssh::commands::list_ssh_keys,

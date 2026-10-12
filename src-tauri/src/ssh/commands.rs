@@ -7,7 +7,7 @@ use russh::client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::net::{lookup_host, TcpStream};
 use tokio::time::timeout;
 
@@ -63,6 +63,18 @@ pub async fn ssh_disconnect(
         crate::telemetry::capture("ssh_disconnected", serde_json::json!({}));
     }
     result
+}
+
+#[tauri::command]
+pub async fn ssh_disconnect_bare(
+    session_id: String,
+    state: State<'_, SshManager>,
+    app_handle: AppHandle,
+) -> Result<(), SshError> {
+    if state.is_bare_connection(&session_id) {
+        state.disconnect(&session_id, app_handle).await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -563,6 +575,88 @@ pub async fn connect_saved_host(
     );
 
     Ok(session_id)
+}
+
+/// Open an independent console in the file browser's current directory.
+#[tauri::command]
+pub async fn ssh_open_explorer_terminal(
+    host_id: String,
+    path: String,
+    state: State<'_, SshManager>,
+    db: State<'_, Arc<HostDb>>,
+    app_handle: AppHandle,
+    window: tauri::Window,
+) -> Result<SessionId, SshError> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(SshError::IoError("Invalid terminal directory".into()));
+    }
+    let db = Arc::clone(&db);
+    let mut config = tokio::task::spawn_blocking(move || {
+        build_host_config_blocking(&host_id, &db, &mut Vec::new())
+    })
+    .await
+    .map_err(|e| SshError::IoError(e.to_string()))??;
+    config.startup_command = Some(format!("cd -- {}", crate::scp::shell_quote(&path)));
+    let session_id = timeout(
+        Duration::from_secs(30),
+        state.connect(config, app_handle.clone(), None),
+    )
+    .await
+    .map_err(|_| SshError::IoError("Terminal connection timed out".into()))??;
+    if app_handle.get_webview_window(window.label()).is_none() {
+        let _ = state.disconnect(&session_id.0, app_handle.clone()).await;
+        return Err(SshError::IoError("Terminal window was closed".into()));
+    }
+    if window.label().starts_with("explorer-terminal-") {
+        let app = app_handle.clone();
+        let id = session_id.0.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let app = app.clone();
+                let id = id.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = app.state::<SshManager>().disconnect(&id, app.clone()).await;
+                });
+            }
+        });
+    }
+    Ok(session_id)
+}
+
+#[tauri::command]
+pub async fn open_explorer_terminal_window(
+    host_id: String,
+    path: String,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    fn encode(value: &str) -> String {
+        value
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect()
+    }
+    let route = format!(
+        "index.html?terminal_host={}&terminal_path={}",
+        encode(&host_id),
+        encode(&path)
+    );
+    tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        format!("explorer-terminal-{}", uuid::Uuid::new_v4()),
+        tauri::WebviewUrl::App(route.into()),
+    )
+    .title("anySCP - SSH terminal")
+    .inner_size(900.0, 600.0)
+    .min_inner_size(450.0, 300.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Short label for an AuthMethod variant, used for telemetry only.

@@ -161,6 +161,7 @@ pub struct TransferInfo {
 
 // ─── Manager ─────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct SftpSessionWrapper {
     pub sftp: Arc<Mutex<russh_sftp::client::SftpSession>>,
     #[allow(dead_code)]
@@ -169,6 +170,8 @@ pub struct SftpSessionWrapper {
 
 pub struct SftpManager {
     sessions: DashMap<String, SftpSessionWrapper>,
+    pub(super) prepared_drags:
+        DashMap<String, (String, std::path::PathBuf, Vec<std::path::PathBuf>)>,
     active_transfers: DashMap<String, CancellationToken>,
 }
 
@@ -177,6 +180,7 @@ impl SftpManager {
         Self {
             sessions: DashMap::new(),
             active_transfers: DashMap::new(),
+            prepared_drags: DashMap::new(),
         }
     }
 
@@ -195,6 +199,7 @@ impl SftpManager {
 
     pub fn remove_session(&self, id: &str) {
         self.sessions.remove(id);
+        self.prepared_drags.retain(|_, (owner, _, _)| owner != id);
     }
 
     pub fn insert_transfer(&self, id: String, token: CancellationToken) {

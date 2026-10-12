@@ -128,6 +128,7 @@ export function McpSettings() {
               onChange={(event) => setConfig({ ...config, port: Number(event.target.value) })} />
           </label>
           <p className="font-mono break-all text-[length:var(--text-xs)] text-text-muted">http://127.0.0.1:{config.port}/mcp</p>
+          <p className="text-[length:var(--text-xs)] text-text-muted">UTF-8 file limit: 100 MiB for reading and writing. Command output: 512 KiB.</p>
           <label className="flex items-start gap-3 text-[length:var(--text-sm)] text-text-primary">
             <input type="checkbox" className="mt-1" checked={config.allowWrites} disabled={busy} onChange={(event) => setConfig({ ...config, allowWrites: event.target.checked })} />
             <span>Allow commands and file changes<span className="block mt-1 text-[length:var(--text-xs)] text-text-muted">Lets connected clients run shell commands, write, rename and delete files on the selected servers.</span></span>

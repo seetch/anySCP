@@ -381,6 +381,8 @@ export function ExplorerFileTable({
   // Drag-and-drop state (internal move). The OS-level Tauri drag-drop handler is
   // enabled (for file-drop uploads), which suppresses HTML5 drag events in the
   // webview — so internal move/copy is driven by pointer events, not `draggable`.
+  const pointerDragCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => pointerDragCleanup.current?.(), []);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragGhost, setDragGhost] = useState<{
     x: number;
@@ -584,6 +586,7 @@ export function ExplorerFileTable({
       if (!(caps.canInternalDragMove || onDragOut)) return;
       if ((e.target as HTMLElement).closest("input")) return;
 
+      pointerDragCleanup.current?.();
       const dragEntries =
         selectedIds.has(entry.id) && selectedIds.size > 1
           ? selectedEntries
@@ -628,7 +631,7 @@ export function ExplorerFileTable({
           if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
           started = true;
           // Providers that can't move in-app (none today) can only download.
-          if (!caps.canInternalDragMove) {
+          if (!caps.canInternalDragMove || ((ev.ctrlKey || ev.metaKey) && onDragOut)) {
             dragOut();
             return;
           }
@@ -684,8 +687,11 @@ export function ExplorerFileTable({
       };
 
       function teardown() {
+        pointerDragCleanup.current = null;
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", teardown);
+        window.removeEventListener("blur", teardown);
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("keyup", onKey);
         document.removeEventListener("mouseleave", onWindowLeave);
@@ -693,8 +699,11 @@ export function ExplorerFileTable({
         setDragGhost(null);
       }
 
+      pointerDragCleanup.current = teardown;
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", teardown);
+      window.addEventListener("blur", teardown);
       window.addEventListener("keydown", onKey);
       window.addEventListener("keyup", onKey);
       document.addEventListener("mouseleave", onWindowLeave);

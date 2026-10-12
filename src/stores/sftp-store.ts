@@ -13,6 +13,10 @@ export interface SftpSession {
   /** Configured initial directory for this host's file browser (empty = home).
    *  May contain a leading `~` to expand against the remote home directory. */
   startDirectory: string;
+  hostId: string | null;
+  history: string[];
+  historyIndex: number;
+  pendingHistoryIndex: number | null;
   entries: SftpEntry[];
   loading: boolean;
   error: string | null;
@@ -27,10 +31,14 @@ interface SftpState {
   activeSftpSessionId: string | null;
   clipboard: SftpClipboard | null;
 
-  openSession: (sftpSessionId: string, sshSessionId: string, label: string, username?: string, sudoMode?: boolean, startDirectory?: string) => void;
+  openSession: (sftpSessionId: string, sshSessionId: string, label: string, username?: string, sudoMode?: boolean, startDirectory?: string, hostId?: string) => void;
   closeSession: (sftpSessionId: string) => void;
   /** Replace an existing session's ID in-place (used by sudo toggle). */
   swapSession: (oldId: string, newId: string, sudoMode: boolean) => void;
+  setSshSession: (id: string, sshId: string) => void;
+  setHistoryTarget: (id: string, index: number | null) => void;
+  recentDirectories: Record<string, string[]>;
+  loadRecentDirectories: (hostId: string) => Promise<void>;
   setActiveSftpSession: (id: string | null) => void;
   setEntries: (sftpSessionId: string, path: string, entries: SftpEntry[]) => void;
   setLoading: (sftpSessionId: string, loading: boolean) => void;
@@ -45,12 +53,40 @@ interface SftpState {
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
-export const useSftpStore = create<SftpState>((set) => ({
+export const useSftpStore = create<SftpState>((set, get) => ({
   sessions: new Map(),
   activeSftpSessionId: null,
   clipboard: null,
+  recentDirectories: {},
+  loadRecentDirectories: async (hostId) => {
+    if (get().recentDirectories[hostId]) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<[string, string][]>("load_all_settings");
+      const raw = settings.find(([key]) => key === `explorer_recent_${hostId}`)?.[1];
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      const paths = Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === "string" && p.startsWith("/")).slice(0, 20) : [];
+      set((state) => ({ recentDirectories: { ...state.recentDirectories, [hostId]: state.recentDirectories[hostId] ?? paths } }));
+    } catch {
+      // A failed read remains retryable; live navigation still works.
+    }
+  },
+  setSshSession: (id, sshId) => set((state) => {
+    const session = state.sessions.get(id);
+    if (!session) return state;
+    const next = new Map(state.sessions);
+    next.set(id, { ...session, sshSessionId: sshId });
+    return { sessions: next };
+  }),
+  setHistoryTarget: (id, index) => set((state) => {
+    const session = state.sessions.get(id);
+    if (!session) return state;
+    const next = new Map(state.sessions);
+    next.set(id, { ...session, pendingHistoryIndex: index });
+    return { sessions: next };
+  }),
 
-  openSession: (sftpSessionId, sshSessionId, label, username, sudoMode, startDirectory) =>
+  openSession: (sftpSessionId, sshSessionId, label, username, sudoMode, startDirectory, hostId) =>
     set((state) => {
       const next = new Map(state.sessions);
       next.set(sftpSessionId, {
@@ -61,6 +97,10 @@ export const useSftpStore = create<SftpState>((set) => ({
         sudoMode: sudoMode ?? false,
         currentPath: "/",
         startDirectory: startDirectory ?? "",
+        hostId: hostId ?? null,
+        history: [],
+        historyIndex: -1,
+        pendingHistoryIndex: null,
         entries: [],
         loading: false,
         error: null,
@@ -108,8 +148,22 @@ export const useSftpStore = create<SftpState>((set) => ({
       const session = state.sessions.get(sftpSessionId);
       if (!session) return state;
       const next = new Map(state.sessions);
-      next.set(sftpSessionId, { ...session, currentPath: path, entries, loading: false, error: null });
-      return { sessions: next };
+      let history = session.history;
+      let historyIndex = session.historyIndex;
+      if (session.pendingHistoryIndex !== null && history[session.pendingHistoryIndex] === path) {
+        historyIndex = session.pendingHistoryIndex;
+      } else if (history[historyIndex] !== path) {
+        history = [...history.slice(0, historyIndex + 1), path].slice(-100);
+        historyIndex = history.length - 1;
+      }
+      next.set(sftpSessionId, { ...session, currentPath: path, entries, history, historyIndex, pendingHistoryIndex: null, loading: false, error: null });
+      const recentDirectories = { ...state.recentDirectories };
+      if (session.hostId) {
+        const paths = [path, ...(recentDirectories[session.hostId] ?? []).filter((p) => p !== path)].slice(0, 20);
+        recentDirectories[session.hostId] = paths;
+        persistRecentDirectories(session.hostId, paths);
+      }
+      return { sessions: next, recentDirectories };
     }),
 
   setLoading: (sftpSessionId, loading) =>
@@ -126,7 +180,7 @@ export const useSftpStore = create<SftpState>((set) => ({
       const session = state.sessions.get(sftpSessionId);
       if (!session) return state;
       const next = new Map(state.sessions);
-      next.set(sftpSessionId, { ...session, error, loading: false });
+      next.set(sftpSessionId, { ...session, error, pendingHistoryIndex: null, loading: false });
       return { sessions: next };
     }),
 
@@ -142,6 +196,15 @@ export const useSftpStore = create<SftpState>((set) => ({
   setClipboard: (clipboard) =>
     set({ clipboard }),
 }));
+
+// Serialize writes so a slower previous navigation cannot replace newer history.
+let recentWrites: Promise<void> = Promise.resolve();
+function persistRecentDirectories(hostId: string, paths: string[]): void {
+  recentWrites = recentWrites.then(async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_setting", { key: `explorer_recent_${hostId}`, value: JSON.stringify(paths) });
+  }).catch(() => { /* Keep in-memory suggestions if persistence is unavailable. */ });
+}
 
 // E2E test hooks — wrap the backend transfer commands so specs can drive
 // upload/download/copy/move without going through the (un-driveable) Tauri
