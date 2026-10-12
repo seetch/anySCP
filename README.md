@@ -161,6 +161,7 @@ Already have anySCP installed? Go to **Settings → About & Updates** and click 
 ### Requirements
 
 - macOS 11+, Windows 10+, or Linux (Ubuntu 22.04+)
+- On Linux: a running Secret Service provider (such as KWallet or GNOME Keyring) with an unlocked default wallet/keyring to save and retrieve credentials across login sessions
 - For SFTP: SSH access to remote servers
 - For S3: Access key and secret key (or S3-compatible credentials)
 
@@ -252,6 +253,10 @@ Contributions are welcome! Here's how you can help:
 Please open an issue first to discuss what you'd like to change.
 
 ## 🐛 Troubleshooting
+
+### Linux Credential Storage
+
+Linux credentials are stored persistently in the desktop Secret Service, rather than the session-only kernel keyring. Unlock your default wallet/keyring when prompted. After upgrading from a build using the kernel keyring, re-enter and save each password or SSH key passphrase once; credentials already lost at logout cannot be recovered. Saved server profiles remain intact.
 
 ### SSH Connection Issues
 

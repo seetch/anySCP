@@ -60,12 +60,11 @@ tokio-util = { version = "0.7" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# OS credential store: macOS Keychain (apple-native), Windows DPAPI
-# (windows-native), Linux kernel keyutils (linux-native — name is misleading;
-# it's the keyutils backend, not libsecret). On Linux, PAM normally sets up
-# a session keyring on login; in containers you need `keyctl session` + a
-# non-default seccomp profile.
-keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
+# OS credential store: macOS Keychain, Windows Credential Manager, and
+# Linux Secret Service (KWallet / GNOME Keyring). The linux-native keyutils
+# backend only stores secrets in memory, so they are lost after logout/reboot.
+# Encrypt Secret Service IPC and bundle libdbus for portable Linux builds.
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "crypto-rust", "vendored", "windows-native"] }
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
