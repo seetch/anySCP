@@ -172,6 +172,7 @@ pub struct SftpManager {
     sessions: DashMap<String, SftpSessionWrapper>,
     pub(super) prepared_drags:
         DashMap<String, (String, std::path::PathBuf, Vec<std::path::PathBuf>)>,
+    pub(super) drag_preparations: DashMap<String, (String, CancellationToken)>,
     active_transfers: DashMap<String, CancellationToken>,
 }
 
@@ -181,6 +182,7 @@ impl SftpManager {
             sessions: DashMap::new(),
             active_transfers: DashMap::new(),
             prepared_drags: DashMap::new(),
+            drag_preparations: DashMap::new(),
         }
     }
 
@@ -200,6 +202,14 @@ impl SftpManager {
     pub fn remove_session(&self, id: &str) {
         self.sessions.remove(id);
         self.prepared_drags.retain(|_, (owner, _, _)| owner != id);
+        self.drag_preparations.retain(|_, (owner, cancel)| {
+            if owner == id {
+                cancel.cancel();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub fn insert_transfer(&self, id: String, token: CancellationToken) {

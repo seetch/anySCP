@@ -1095,17 +1095,80 @@ async fn stage_entries(
     Ok(files)
 }
 
+#[cfg(target_os = "linux")]
+struct DragGesture {
+    event: gtk::gdk::Event,
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    static DRAG_GESTURE: std::cell::RefCell<Option<DragGesture>> = const { std::cell::RefCell::new(None) };
+    static NATIVE_DRAG_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NATIVE_DRAG_CONTEXT: std::cell::RefCell<Option<(String, gtk::gdk::DragContext)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Remember the real button press, including the Wayland input serial/device.
+#[cfg(target_os = "linux")]
+pub fn track_drag_gestures(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    window.with_webview(|webview| {
+        use gtk::prelude::*;
+        webview.inner().connect_event(|_, event| {
+            if event.button() == Some(1) {
+                match event.event_type() {
+                    gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::DoubleButtonPress => {
+                        DRAG_GESTURE.with(|gesture| {
+                            *gesture.borrow_mut() = Some(DragGesture {
+                                event: event.clone(),
+                            })
+                        });
+                    }
+                    gtk::gdk::EventType::ButtonRelease => {
+                        DRAG_GESTURE.with(|gesture| gesture.borrow_mut().take());
+                    }
+                    _ => {}
+                }
+            }
+            gtk::glib::Propagation::Proceed
+        });
+    })?;
+    window.on_window_event(|event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            DRAG_GESTURE.with(|gesture| gesture.borrow_mut().take());
+        }
+    });
+    Ok(())
+}
+
 /// Keep URI data available until the receiving application finishes the drag.
 #[cfg(target_os = "linux")]
 fn start_gtk_drag(
     window: &gtk::ApplicationWindow,
     files: Vec<PathBuf>,
+    preparation_id: String,
     result: std::sync::mpsc::Sender<Result<bool, SftpError>>,
 ) -> Result<(), SftpError> {
     use gtk::prelude::*;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
+    let event = DRAG_GESTURE
+        .with(|gesture| {
+            gesture
+                .borrow()
+                .as_ref()
+                .map(|gesture| gesture.event.clone())
+        })
+        .ok_or_else(|| {
+            SftpError::LocalIoError(
+                "Mouse gesture ended. Drag the prepared files again while holding the left button."
+                    .into(),
+            )
+        })?;
+    if NATIVE_DRAG_ACTIVE.with(|active| active.get()) {
+        return Err(SftpError::LocalIoError(
+            "A desktop drag is already active".into(),
+        ));
+    }
     let uris: Vec<String> = files
         .iter()
         .map(|path| {
@@ -1140,6 +1203,7 @@ fn start_gtk_drag(
             failed_drag.set(true);
             gtk::glib::Propagation::Proceed
         }));
+    let timeout_result = result.clone();
     let handlers_end = handlers.clone();
     let finished_end = finished.clone();
     let timer_end = timer.clone();
@@ -1147,6 +1211,8 @@ fn start_gtk_drag(
         .borrow_mut()
         .push(window.connect_drag_end(move |widget, context| {
             finished_end.set(true);
+            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
+            NATIVE_DRAG_CONTEXT.with(|context| context.borrow_mut().take());
             let dropped = !failed.get() && supplied.get() && !context.selected_action().is_empty();
             for id in handlers_end.borrow_mut().drain(..) {
                 widget.disconnect(id);
@@ -1157,34 +1223,48 @@ fn start_gtk_drag(
             }
             let _ = result.send(Ok(dropped));
         }));
-    let event = gtk::current_event();
+    NATIVE_DRAG_ACTIVE.with(|active| active.set(true));
     let context = window.drag_source_get_target_list().and_then(|targets| {
         // GTK expects button number 1, not the BUTTON1_MASK bit flag.
         window.drag_begin_with_coordinates(
             &targets,
             gtk::gdk::DragAction::COPY,
             1,
-            event.as_ref(),
+            Some(&event),
             -1,
             -1,
         )
     });
     match context {
         Some(context) => {
+            NATIVE_DRAG_CONTEXT
+                .with(|active| *active.borrow_mut() = Some((preparation_id, context.clone())));
             context.drag_set_icon_name("document-save", 0, 0);
             let timer_timeout = timer.clone();
+            let timeout_window = window.clone();
+            let timeout_handlers = handlers.clone();
             *timer.borrow_mut() = Some(gtk::glib::timeout_add_local_once(
-                Duration::from_secs(110),
+                Duration::from_secs(45),
                 move || {
                     timer_timeout.borrow_mut().take();
                     if !finished.get() {
                         context.drag_cancel();
+                        if !finished.replace(true) {
+                            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
+                            NATIVE_DRAG_CONTEXT.with(|active| active.borrow_mut().take());
+                            for id in timeout_handlers.borrow_mut().drain(..) {
+                                timeout_window.disconnect(id);
+                            }
+                            timeout_window.drag_source_unset();
+                            let _ = timeout_result.send(Err(SftpError::LocalIoError("Desktop drag timed out. The prepared files are available for another attempt.".into())));
+                        }
                     }
                 },
             ));
             Ok(())
         }
         None => {
+            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
             for id in handlers.borrow_mut().drain(..) {
                 window.disconnect(id);
             }
@@ -1199,7 +1279,10 @@ async fn start_native_drag(
     app: AppHandle,
     window: Window,
     files: Vec<PathBuf>,
+    preparation_id: String,
 ) -> Result<bool, SftpError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = preparation_id;
     #[cfg(not(target_os = "linux"))]
     let icon_bytes = DRAG_ICON_PNG.to_vec();
 
@@ -1216,7 +1299,7 @@ async fn start_native_drag(
             match raw_window {
                 Ok(w) => {
                     #[cfg(target_os = "linux")]
-                    let started = start_gtk_drag(&w, files, tx_cb);
+                    let started = start_gtk_drag(&w, files, preparation_id, tx_cb);
                     #[cfg(not(target_os = "linux"))]
                     let started = drag::start_drag(
                         &w,
@@ -1242,11 +1325,26 @@ async fn start_native_drag(
         })
         .map_err(|e| SftpError::LocalIoError(format!("main-thread dispatch failed: {e}")))?;
 
-        rx.recv_timeout(Duration::from_secs(120))
+        rx.recv_timeout(Duration::from_secs(60))
             .map_err(|e| SftpError::LocalIoError(format!("drag did not finish: {e}")))?
     })
     .await
     .map_err(|e| SftpError::LocalIoError(format!("drag task failed: {e}")))?
+}
+
+async fn wait_for_drag_preparation<F>(
+    preparation: F,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<Vec<PathBuf>, SftpError>
+where
+    F: std::future::Future<Output = Result<Vec<PathBuf>, SftpError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(SftpError::TransferCancelled),
+        result = tokio::time::timeout(timeout, preparation) => result.unwrap_or_else(|_| Err(SftpError::LocalIoError("Preparing the download timed out; try a smaller selection.".into()))),
+    }
 }
 
 /// Download the selection before handing real file paths to the desktop.
@@ -1254,11 +1352,11 @@ async fn start_native_drag(
 pub async fn sftp_prepare_drag_out(
     sftp_session_id: String,
     remote_paths: Vec<String>,
+    preparation_id: Option<String>,
     sftp_manager: State<'_, Arc<SftpManager>>,
 ) -> Result<String, SftpError> {
     let sftp_arc = sftp_manager.get_session(&sftp_session_id)?.sftp.clone();
     let root = std::env::temp_dir().join("anyscp-dragout");
-    sweep_stale_dragout(&root).await;
     sftp_manager
         .prepared_drags
         .retain(|_, (owner, _, _)| owner != &sftp_session_id);
@@ -1267,10 +1365,25 @@ pub async fn sftp_prepare_drag_out(
             "Too many prepared downloads. Try again later.".into(),
         ));
     }
-    let token = uuid::Uuid::new_v4().to_string();
+    let token = match preparation_id {
+        Some(id) => uuid::Uuid::parse_str(&id)
+            .map_err(|_| SftpError::InvalidPath("Invalid preparation ID".into()))?
+            .to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let cancel = CancellationToken::new();
+    sftp_manager
+        .drag_preparations
+        .insert(token.clone(), (sftp_session_id.clone(), cancel.clone()));
     let stage = root.join(&token);
-    create_private_dir(&stage).await?;
-    let files = match stage_entries(&sftp_arc, &remote_paths, &stage).await {
+    let prepared = async {
+        sweep_stale_dragout(&root).await;
+        create_private_dir(&stage).await?;
+        stage_entries(&sftp_arc, &remote_paths, &stage).await
+    };
+    let result = wait_for_drag_preparation(prepared, &cancel, Duration::from_secs(120)).await;
+    sftp_manager.drag_preparations.remove(&token);
+    let files = match result {
         Ok(files) if !files.is_empty() => files,
         Ok(_) => {
             let _ = tokio::fs::remove_dir_all(&stage).await;
@@ -1296,10 +1409,10 @@ pub async fn sftp_start_drag_out(
     prepared_id: String,
     sftp_manager: State<'_, Arc<SftpManager>>,
 ) -> Result<DragOutResult, SftpError> {
-    let entry = sftp_manager.prepared_drags.entry(prepared_id);
-    let (_, stage, files) = match entry {
+    let entry = sftp_manager.prepared_drags.entry(prepared_id.clone());
+    let (_, _stage, files) = match entry {
         dashmap::mapref::entry::Entry::Occupied(entry) if entry.get().0 == sftp_session_id => {
-            entry.remove()
+            entry.get().clone()
         }
         _ => {
             return Err(SftpError::InvalidPath(
@@ -1308,13 +1421,51 @@ pub async fn sftp_start_drag_out(
         }
     };
     let count = files.len();
-    let result = start_native_drag(app, window, files).await;
-    // An error/timeout can leave an OS drag active. Keep those files until the
-    // regular staging sweep; only a confirmed cancellation permits cleanup.
-    if matches!(result, Ok(false)) {
-        let _ = tokio::fs::remove_dir_all(&stage).await;
-    }
+    let result = start_native_drag(app, window, files, prepared_id).await;
+    // Retain the prepared bytes for a fresh gesture after a cancelled/failed
+    // native drag. The next preparation or the staging sweep retires them.
     result.map(|dropped| DragOutResult { dropped, count })
+}
+
+#[tauri::command]
+pub async fn sftp_cancel_drag_out(
+    sftp_session_id: String,
+    preparation_id: String,
+    sftp_manager: State<'_, Arc<SftpManager>>,
+    app: AppHandle,
+) -> Result<(), SftpError> {
+    if let Some(preparation) = sftp_manager.drag_preparations.get(&preparation_id) {
+        if preparation.0 == sftp_session_id {
+            preparation.1.cancel();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let id = preparation_id.clone();
+        app.run_on_main_thread(move || {
+            use gtk::prelude::*;
+            let context = NATIVE_DRAG_CONTEXT.with(|active| {
+                active
+                    .borrow()
+                    .as_ref()
+                    .filter(|(active_id, _)| active_id == &id)
+                    .map(|(_, context)| context.clone())
+            });
+            if let Some(context) = context {
+                context.drag_cancel();
+            }
+        })
+        .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+    let entry = sftp_manager.prepared_drags.entry(preparation_id);
+    if let dashmap::mapref::entry::Entry::Occupied(entry) = entry {
+        if entry.get().0 == sftp_session_id {
+            entry.remove();
+        }
+    }
+    Ok(())
 }
 
 // Retained for callers using the original single-step command.
@@ -1326,8 +1477,13 @@ pub async fn sftp_drag_out(
     remote_paths: Vec<String>,
     sftp_manager: State<'_, Arc<SftpManager>>,
 ) -> Result<DragOutResult, SftpError> {
-    let prepared_id =
-        sftp_prepare_drag_out(sftp_session_id.clone(), remote_paths, sftp_manager.clone()).await?;
+    let prepared_id = sftp_prepare_drag_out(
+        sftp_session_id.clone(),
+        remote_paths,
+        None,
+        sftp_manager.clone(),
+    )
+    .await?;
     sftp_start_drag_out(app, window, sftp_session_id, prepared_id, sftp_manager).await
 }
 
@@ -2121,6 +2277,41 @@ pub async fn sftp_set_concurrency(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_preparation_does_not_wait_for_the_remote_server() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result =
+            wait_for_drag_preparation(std::future::pending(), &cancel, Duration::from_secs(120))
+                .await;
+        assert!(matches!(result, Err(SftpError::TransferCancelled)));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_preparation_has_a_deadline() {
+        let result = wait_for_drag_preparation(
+            std::future::pending(),
+            &CancellationToken::new(),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SftpError::LocalIoError(message)) if message.contains("timed out"))
+        );
+    }
+
+    #[test]
+    fn closing_a_browser_cancels_its_pending_download_preparation() {
+        let manager = SftpManager::new();
+        let cancel = CancellationToken::new();
+        manager
+            .drag_preparations
+            .insert("preparation".into(), ("browser".into(), cancel.clone()));
+        manager.remove_session("browser");
+        assert!(cancel.is_cancelled());
+        assert!(manager.drag_preparations.is_empty());
+    }
 
     #[test]
     fn chmod_attrs_sets_only_permissions() {

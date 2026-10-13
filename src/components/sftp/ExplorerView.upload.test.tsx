@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 // ── Tauri module mocks ───────────────────────────────────────────────────────
 // ExplorerView imports `invoke` at module level and lazily imports the dialog
@@ -29,9 +29,14 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 
 import { ExplorerView } from "./ExplorerView";
 import { useSftpStore } from "../../stores/sftp-store";
+import type { SftpEntry } from "../../types";
 
 const SESSION_ID = "sess-1";
 const CURRENT_PATH = "/home/user";
+
+class TestPointerEvent extends MouseEvent {
+  readonly pointerId = 1;
+}
 
 function seedSession(): void {
   const store = useSftpStore.getState();
@@ -235,5 +240,100 @@ describe("ExplorerView navigation and recovery", () => {
     await screen.findByText("Permission denied");
     expect(useSftpStore.getState().sessions.get(SESSION_ID)?.currentPath).toBe(CURRENT_PATH);
     expect(invoke.mock.calls.some(([command]) => command === "sftp_reconnect")).toBe(false);
+  });
+});
+
+describe("download preparation lifecycle", () => {
+  const file: SftpEntry = { name: "notes.txt", path: `${CURRENT_PATH}/notes.txt`, entry_type: "File", size: 12, permissions: 0o644, permissions_display: "rw-r--r--", modified: null, is_symlink: false };
+  beforeEach(() => {
+    invoke.mockReset();
+    vi.stubGlobal("PointerEvent", TestPointerEvent);
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => null });
+    useSftpStore.setState({ sessions: new Map(), activeSftpSessionId: null, clipboard: null, recentDirectories: {} });
+    seedSession();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  async function beginDrag() {
+    render(<ExplorerView sessionId={SESSION_ID} />);
+    const name = await screen.findByText(file.name);
+    const row = name.closest("[data-entry-row]")!;
+    fireEvent.pointerDown(row, { button: 0, buttons: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(window, { buttons: 1, clientX: 120, clientY: 100 });
+  }
+
+  it("stops Preparing as soon as bytes are ready, without waiting for desktop drag completion", async () => {
+    let finishNative!: (value: { dropped: boolean; count: number }) => void;
+    const native = new Promise((resolve) => { finishNative = resolve; });
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "sftp_list_dir") return [file];
+      if (command === "sftp_prepare_drag_out") return (args as { preparationId: string }).preparationId;
+      if (command === "sftp_start_drag_out") return native;
+      return [];
+    });
+    await beginDrag();
+    await screen.findByTestId("explorer-ready-download");
+    fireEvent.pointerMove(window, { buttons: 1, clientX: window.innerWidth - 12, clientY: 100 });
+    await screen.findByText("Drop files to copy, or press Esc to cancel.");
+    expect(screen.queryByText("Preparing files for download…")).not.toBeInTheDocument();
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "sftp_prepare_drag_out")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("explorer-cancel-drag"));
+    expect(screen.queryByText("Drop files to copy, or press Esc to cancel.")).not.toBeInTheDocument();
+    await act(async () => { finishNative({ dropped: false, count: 1 }); await native; });
+    await waitFor(() => expect(invoke.mock.calls.some(([cmd]) => cmd === "sftp_cancel_drag_out")).toBe(true));
+    expect(screen.queryByTestId("explorer-ready-download")).not.toBeInTheDocument();
+  });
+
+  it("reuses prepared bytes after the desktop drag is cancelled", async () => {
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "sftp_list_dir") return [file];
+      if (command === "sftp_prepare_drag_out") return (args as { preparationId: string }).preparationId;
+      if (command === "sftp_start_drag_out") return { dropped: false, count: 1 };
+      return [];
+    });
+    await beginDrag();
+    await screen.findByTestId("explorer-ready-download");
+    fireEvent.pointerMove(window, { buttons: 1, clientX: window.innerWidth - 12, clientY: 100 });
+    await waitFor(() => expect(invoke.mock.calls.filter(([cmd]) => cmd === "sftp_start_drag_out")).toHaveLength(1));
+    const ready = await screen.findByTestId("explorer-ready-download");
+    expect(screen.queryByText("Preparing files for download…")).not.toBeInTheDocument();
+    fireEvent.pointerDown(ready, { button: 0, buttons: 1 });
+    await waitFor(() => expect(invoke.mock.calls.filter(([cmd]) => cmd === "sftp_start_drag_out")).toHaveLength(2));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "sftp_prepare_drag_out")).toHaveLength(1);
+  });
+
+  it("allows Escape to cancel preparation after the pointer gesture has ended", async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "sftp_list_dir") return [file];
+      if (command === "sftp_prepare_drag_out") return new Promise(() => {});
+      return [];
+    });
+    await beginDrag();
+    await screen.findByText("Preparing files for download…");
+    fireEvent.pointerMove(window, { buttons: 1, clientX: window.innerWidth - 12, clientY: 100 });
+    fireEvent.pointerUp(window, { button: 0 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText("Preparing files for download…")).not.toBeInTheDocument();
+    await waitFor(() => expect(invoke.mock.calls.some(([cmd]) => cmd === "sftp_cancel_drag_out")).toBe(true));
+  });
+
+  it("cancels a pending download immediately and ignores its late completion", async () => {
+    let finishPreparation!: (id: string) => void;
+    const preparation = new Promise<string>((resolve) => { finishPreparation = resolve; });
+    invoke.mockImplementation(async (command) => {
+      if (command === "sftp_list_dir") return [file];
+      if (command === "sftp_prepare_drag_out") return preparation;
+      return [];
+    });
+    await beginDrag();
+    await screen.findByText("Preparing files for download…");
+    fireEvent.pointerMove(window, { buttons: 1, clientX: window.innerWidth - 12, clientY: 100 });
+    fireEvent.click(screen.getByTestId("explorer-cancel-drag"));
+    expect(screen.queryByText("Preparing files for download…")).not.toBeInTheDocument();
+    const args = invoke.mock.calls.find(([cmd]) => cmd === "sftp_prepare_drag_out")?.[1] as { preparationId: string };
+    finishPreparation(args.preparationId);
+    await waitFor(() => expect(invoke.mock.calls.filter(([cmd]) => cmd === "sftp_cancel_drag_out").length).toBeGreaterThanOrEqual(2));
+    expect(invoke.mock.calls.some(([cmd]) => cmd === "sftp_start_drag_out")).toBe(false);
+    expect(screen.queryByTestId("explorer-ready-download")).not.toBeInTheDocument();
   });
 });

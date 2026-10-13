@@ -60,7 +60,7 @@ describe("file browser SSH terminal", () => {
     const toggle = screen.getByTestId("explorer-terminal");
     fireEvent.click(toggle);
     expect(await screen.findByTestId("console")).toBeVisible();
-    expect(terminalMount).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(terminalMount).toHaveBeenCalledTimes(1));
     fireEvent.click(toggle);
     expect(screen.getByTestId("console")).not.toBeVisible();
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
