@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AlertCircle, Download, Loader2 } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { useSftpStore } from "../../stores/sftp-store";
 import { useTabStore } from "../../stores/tab-store";
 import type { SftpEntry } from "../../types";
@@ -13,18 +13,6 @@ import { editorLaunchErrorMessage } from "../../lib/editor-errors";
 import { conflictingNames } from "../../lib/drop-conflicts";
 import { toast } from "../../stores/toast-store";
 import type { EditorConfig } from "../../stores/settings-store";
-
-interface PreparedDrag {
-  id: string;
-  paths: string[];
-}
-
-interface DragPreparation {
-  id: string;
-  paths: string[];
-  controller: AbortController;
-  promise: Promise<PreparedDrag>;
-}
 
 interface ExplorerViewProps {
   /** The transport session id (sftp_session_id or scp_session_id). */
@@ -42,7 +30,6 @@ interface ExplorerViewProps {
 }
 
 export function ExplorerView({ sessionId, transport = "sftp", isActive = true }: ExplorerViewProps) {
-  const viewRef = useRef<HTMLDivElement>(null);
   const listingSequence = useRef(0);
   const reconnecting = useRef<Promise<string> | null>(null);
   const session = useSftpStore((s) => s.sessions.get(sessionId));
@@ -76,25 +63,6 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   // and (b) the OS drag re-entering our own window drop listener and
   // re-uploading the just-staged temp files (a self-drop).
   const isDraggingOut = useRef(false);
-  const [preparingDrag, setPreparingDrag] = useState(false);
-  const [nativeDragging, setNativeDragging] = useState(false);
-  const cancelledNativeDrags = useRef(new Set<string>());
-  const [preparedDrag, setPreparedDrag] = useState<PreparedDrag | null>(null);
-  const preparedDragRef = useRef<PreparedDrag | null>(null);
-  const dragPreparation = useRef<DragPreparation | null>(null);
-  const handingOffDrag = useRef(false);
-  const dragMounted = useRef(true);
-  useEffect(() => {
-    dragMounted.current = true;
-    return () => {
-      dragMounted.current = false;
-      const pending = dragPreparation.current;
-      if (pending) {
-        pending.controller.abort();
-        void explorerInvoke(transport, "cancel_drag_out", sessionId, { preparationId: pending.id }).catch(() => {});
-      }
-    };
-  }, []);
   const currentPathRef = useRef(session?.currentPath ?? "/");
   currentPathRef.current = session?.currentPath ?? "/";
 
@@ -134,13 +102,12 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   // we divide by devicePixelRatio ONLY on Windows; doing so elsewhere would
   // halve the coordinate on HiDPI/Retina and hit the wrong row.
   const resolveDropDir = useCallback(
-    (position?: { x: number; y: number }): string | null => {
+    (position?: { x: number; y: number }): string => {
       const base = currentPathRef.current;
       if (!position) return base;
       const scale = isWindowsWebview() ? window.devicePixelRatio || 1 : 1;
       const el = document.elementFromPoint(position.x / scale, position.y / scale);
-      if (!el || !viewRef.current?.contains(el)) return null;
-      const row = el.closest("[data-entry-row]") as HTMLElement | null;
+      const row = el?.closest("[data-entry-row]") as HTMLElement | null;
       if (row && row.dataset.entryType === "Directory") {
         const name = row.dataset.entryName;
         const entries = useSftpStore.getState().sessions.get(sessionId)?.entries ?? [];
@@ -189,9 +156,8 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
           const type = event.payload?.type;
           if (type === "enter" || type === "over") {
-            const target = resolveDropDir(event.payload?.position);
-            setIsDragOver(target !== null);
-            setDropTargetDir(target);
+            setIsDragOver(true);
+            setDropTargetDir(resolveDropDir(event.payload?.position));
           } else if (type === "drop") {
             setIsDragOver(false);
             setDropTargetDir(null);
@@ -202,21 +168,20 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
             // cleared by the time the OS delivered the drop.
             if (paths.some((p) => p.includes(DRAGOUT_STAGING_SEGMENT))) return;
             if (isProcessingDrop.current || paths.length === 0) return;
-            const remoteDir = resolveDropDir(event.payload?.position);
-            if (remoteDir === null) return;
             isProcessingDrop.current = true;
 
+            const remoteDir = resolveDropDir(event.payload?.position);
+
             void (async () => {
-              // Resolve collisions before enqueueing; a failed listing must
-              // not silently turn an upload into an overwrite.
+              // Pre-flight overwrite check. Best-effort: if the target listing
+              // can't be fetched (e.g. permissions) we skip the prompt and let
+              // the upload proceed — a real failure surfaces in the popover.
               let conflicts: string[] = [];
               try {
                 const existing = await explorerInvoke<SftpEntry[]>(transport, "list_dir", sessionId, { path: remoteDir });
                 conflicts = conflictingNames(paths, new Set(existing.map((e) => e.name)));
-              } catch (error) {
-                isProcessingDrop.current = false;
-                toast.error(`Unable to check upload destination: ${errorMessage(error)}. Refresh the directory and try again.`);
-                return;
+              } catch {
+                // Skip the pre-check; proceed to upload.
               }
 
               if (conflicts.length > 0) {
@@ -227,7 +192,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
               }
 
               await uploadDropped(paths, remoteDir);
-              isProcessingDrop.current = false;
+              setTimeout(() => { isProcessingDrop.current = false; }, 500);
             })();
           } else {
             setIsDragOver(false);
@@ -515,128 +480,55 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
 
   // ─── Drag-out (Explorer → OS desktop/Finder) ──────────────────────────────
   //
-  const cancelDragPreparation = useCallback(() => {
-    const pending = dragPreparation.current;
-    const prepared = preparedDragRef.current;
-    const id = pending?.id ?? prepared?.id;
-    if (id && isDraggingOut.current) cancelledNativeDrags.current.add(id);
-    pending?.controller.abort();
-    dragPreparation.current = null;
-    preparedDragRef.current = null;
-    setPreparingDrag(false);
-    setNativeDragging(false);
-    setPreparedDrag(null);
-    if (id) void explorerInvoke(transport, "cancel_drag_out", sessionId, { preparationId: id }).catch(() => {});
-  }, [sessionId, transport]);
-
-  useEffect(() => {
-    if (!preparingDrag || !isActive) return;
-    const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) {
-        event.preventDefault();
-        cancelDragPreparation();
-      }
-    };
-    window.addEventListener("keydown", cancelOnEscape);
-    return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [preparingDrag, isActive, cancelDragPreparation]);
-
-  const prepareDrag = useCallback((entries: ExplorerEntry[]): Promise<PreparedDrag> => {
-    const paths = entries.map((entry) => entry.id);
-    const key = JSON.stringify(paths);
-    const cached = preparedDragRef.current;
-    if (cached && JSON.stringify(cached.paths) === key) return Promise.resolve(cached);
-    const pending = dragPreparation.current;
-    if (pending && JSON.stringify(pending.paths) === key) return pending.promise;
-    cancelDragPreparation();
-    const id = crypto.randomUUID();
-    const controller = new AbortController();
-    setPreparingDrag(true);
-    const cancelled = new Promise<never>((_, reject) => {
-      controller.signal.addEventListener("abort", () => reject(new Error("Preparation cancelled")), { once: true });
-    });
-    const download = explorerInvoke<string>(transport, "prepare_drag_out", sessionId, { remotePaths: paths, preparationId: id }).then((preparedId) => {
-      if (controller.signal.aborted || !dragMounted.current) {
-        void explorerInvoke(transport, "cancel_drag_out", sessionId, { preparationId: preparedId }).catch(() => {});
-        throw new Error("Preparation cancelled");
-      }
-      return { id: preparedId, paths };
-    });
-    const promise = Promise.race([download, cancelled]).then((prepared) => {
-      if (dragMounted.current) {
-        preparedDragRef.current = prepared;
-        setPreparedDrag(prepared);
-      }
-      return prepared;
-    }).catch((error: unknown) => {
-      if (!controller.signal.aborted && dragMounted.current) toast.error(`Preparing download failed: ${errorMessage(error)}`);
-      throw error;
-    }).finally(() => {
-      if (dragPreparation.current?.id === id) {
-        dragPreparation.current = null;
-        if (dragMounted.current) setPreparingDrag(false);
-      }
-    });
-    dragPreparation.current = { id, paths, controller, promise };
-    return promise;
-  }, [sessionId, transport, cancelDragPreparation]);
-
-  const startPreparedDrag = useCallback(async (prepared: PreparedDrag) => {
-    if (isDraggingOut.current) return;
+  // The whole drag-out runs in the backend `sftp_drag_out` command: it stages
+  // every selected entry to a private temp dir (files directly, folders
+  // recursively — fixing the old "only one file" bug), then drives the native
+  // OS drag with those real local paths and resolves once the drag ends. We
+  // must stage *before* the drag because the OS drag API needs concrete file
+  // handles up front — see the drag-out comment in ExplorerFileTable for why
+  // HTML5 DataTransfer can't do this in a webview.
+  //
+  // SCP has no `drag_out` command, so drag-out is wired for SFTP only (see the
+  // `onDragOut` prop below); SCP sessions keep the in-app move drag.
+  //
+  // Known limitation: staging a very large folder blocks until every byte is on
+  // disk (bounded by a backend size cap), so for big selections the drag may
+  // only begin after the mouse is released. The re-entrancy guard below stops a
+  // retry from re-downloading the same selection.
+  const handleDragOut = useCallback((entries: ExplorerEntry[]) => {
+    if (isDraggingOut.current) return; // a drag-out is already staging/dragging
     isDraggingOut.current = true;
-    setNativeDragging(true);
-    setPreparingDrag(false);
-    setPreparedDrag(null);
-    try {
-      const { dropped, count } = await explorerInvoke<DragOutResult>(transport, "start_drag_out", sessionId, { preparedId: prepared.id });
-      if (dropped && count > 0) toast.success(`Handed ${count} ${count === 1 ? "item" : "items"} to your file manager`);
-    } catch (error) {
-      toast.error(`Download drag failed: ${errorMessage(error)}`);
-    } finally {
-      isDraggingOut.current = false;
-      if (dragMounted.current) {
-        setNativeDragging(false);
-        if (!cancelledNativeDrags.current.has(prepared.id) && !dragPreparation.current) {
-          preparedDragRef.current = prepared;
-          setPreparedDrag(prepared);
+    void (async () => {
+      // Staging a large selection blocks before the OS drag can attach; show a
+      // "Preparing…" toast only if it's slow enough to notice, and clear it once
+      // the drag begins/ends.
+      let prepToast: string | null = null;
+      const prepTimer = setTimeout(() => {
+        prepToast = toast.info("Preparing download…");
+      }, 400);
+      try {
+        const remotePaths = entries.map((en) => en.id);
+        const { dropped, count } = await explorerInvoke<DragOutResult>(
+          transport,
+          "drag_out",
+          sessionId,
+          { remotePaths },
+        );
+        // The OS copies asynchronously after the drop and gives no completion
+        // signal; the backend's drop result is the only success hook, so only
+        // confirm when the drag actually dropped (not when it was cancelled).
+        if (dropped && count > 0) {
+          toast.success(`Downloaded ${count} ${count === 1 ? "item" : "items"}`);
         }
-        cancelledNativeDrags.current.delete(prepared.id);
+      } catch (err) {
+        toast.error(`Download failed: ${errorMessage(err)}`);
+      } finally {
+        clearTimeout(prepTimer);
+        if (prepToast) toast.dismiss(prepToast);
+        isDraggingOut.current = false;
       }
-    }
+    })();
   }, [sessionId, transport]);
-
-  const handleDragOut = useCallback(async (entries: ExplorerEntry[], releasePointer?: () => void) => {
-    if (isDraggingOut.current || handingOffDrag.current) return;
-    handingOffDrag.current = true;
-    let pointerHeld = true;
-    const released = () => { pointerHeld = false; };
-    const moved = (event: PointerEvent) => { if (!(event.buttons & 1)) pointerHeld = false; };
-    window.addEventListener("pointerup", released);
-    window.addEventListener("pointercancel", released);
-    window.addEventListener("pointerdown", released);
-    window.addEventListener("pointermove", moved);
-    try {
-      const prepared = await prepareDrag(entries);
-      if (!dragMounted.current) return;
-      // Focus can change at the window boundary on Wayland. The held button
-      // and the backend's saved GTK gesture determine whether a drag is valid.
-      if (pointerHeld) {
-        releasePointer?.();
-        await startPreparedDrag(prepared);
-      } else {
-        releasePointer?.();
-        toast.info("Files are ready. Drag the file again or use Ready download.");
-      }
-    } catch {
-      // Preparation already reports errors; cancellation is intentional.
-    } finally {
-      window.removeEventListener("pointerup", released);
-      window.removeEventListener("pointercancel", released);
-      window.removeEventListener("pointerdown", released);
-      window.removeEventListener("pointermove", moved);
-      handingOffDrag.current = false;
-    }
-  }, [prepareDrag, startPreparedDrag]);
 
   // ─── Upload (dialog) ─────────────────────────────────────────────────────
 
@@ -929,7 +821,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
   if (!session) return null;
 
   return (
-    <div ref={viewRef} className="flex flex-col h-full overflow-hidden relative">
+    <div className="flex flex-col h-full overflow-hidden relative">
       <ExplorerToolbar
         provider={provider}
         currentPath={session.currentPath}
@@ -949,15 +841,6 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         sudoBusy={togglingSudo}
         onToggleSudo={transport === "sftp" && !isRoot ? () => void handleToggleSudo() : undefined}
       />
-
-      {(preparingDrag || preparedDrag || nativeDragging) && <div className="flex items-center gap-2 px-3 py-2 bg-bg-surface border-b border-border text-text-secondary text-[length:var(--text-sm)]">
-        {nativeDragging ? <><Download size={15} />Drop files to copy, or press Esc to cancel.</> : preparingDrag ? <><Loader2 size={15} className="animate-spin" />Preparing files for download…</> : preparedDrag && <button data-testid="explorer-ready-download" className="flex items-center gap-2 px-2 py-1 rounded bg-bg-subtle hover:text-text-primary cursor-grab" title="Hold and drag this button to your file manager" onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          void startPreparedDrag(preparedDrag);
-        }}><Download size={15} />Ready download ({preparedDrag.paths.length}) - drag to your file manager</button>}
-        <button data-testid="explorer-cancel-drag" onClick={cancelDragPreparation} className="ml-auto shrink-0 px-2 py-1 rounded hover:bg-bg-subtle">Cancel</button>
-      </div>}
 
       {/* Error banner */}
       {session.error && (
@@ -995,8 +878,6 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         onPaste={() => void handlePaste()}
         onMoveEntries={handleMoveEntries}
         onCopyEntries={handleCopyEntries}
-        onPrepareDragOut={transport === "sftp" ? (entries) => { void prepareDrag(entries).catch(() => {}); } : undefined}
-        onCancelDragPreparation={transport === "sftp" ? cancelDragPreparation : undefined}
         onDragOut={transport === "sftp" ? handleDragOut : undefined}
         currentPath={session.currentPath}
         loading={session.loading}

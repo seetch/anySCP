@@ -818,7 +818,6 @@ pub async fn sftp_download(
 /// a resolvable bundle-resource path at runtime, and handed to the drag API as
 /// raw bytes so it never needs to live in the staging directory (where a remote
 /// file of the same name could clobber it).
-#[cfg(not(target_os = "linux"))]
 static DRAG_ICON_PNG: &[u8] = include_bytes!("../../icons/32x32.png");
 
 // Hard caps on a single drag-out so a hostile server (e.g. a top-level symlink
@@ -1095,195 +1094,22 @@ async fn stage_entries(
     Ok(files)
 }
 
-#[cfg(target_os = "linux")]
-struct DragGesture {
-    event: gtk::gdk::Event,
-}
-
-#[cfg(target_os = "linux")]
-thread_local! {
-    static DRAG_GESTURE: std::cell::RefCell<Option<DragGesture>> = const { std::cell::RefCell::new(None) };
-    static NATIVE_DRAG_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static NATIVE_DRAG_CONTEXT: std::cell::RefCell<Option<(String, gtk::gdk::DragContext)>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Remember the real button press, including the Wayland input serial/device.
-#[cfg(target_os = "linux")]
-pub fn track_drag_gestures(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    window.with_webview(|webview| {
-        use gtk::prelude::*;
-        webview.inner().connect_event(|_, event| {
-            if event.button() == Some(1) {
-                match event.event_type() {
-                    gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::DoubleButtonPress => {
-                        DRAG_GESTURE.with(|gesture| {
-                            *gesture.borrow_mut() = Some(DragGesture {
-                                event: event.clone(),
-                            })
-                        });
-                    }
-                    gtk::gdk::EventType::ButtonRelease => {
-                        DRAG_GESTURE.with(|gesture| gesture.borrow_mut().take());
-                    }
-                    _ => {}
-                }
-            }
-            gtk::glib::Propagation::Proceed
-        });
-    })?;
-    window.on_window_event(|event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            DRAG_GESTURE.with(|gesture| gesture.borrow_mut().take());
-        }
-    });
-    Ok(())
-}
-
-/// Keep URI data available until the receiving application finishes the drag.
-#[cfg(target_os = "linux")]
-fn start_gtk_drag(
-    window: &gtk::ApplicationWindow,
-    files: Vec<PathBuf>,
-    preparation_id: String,
-    result: std::sync::mpsc::Sender<Result<bool, SftpError>>,
-) -> Result<(), SftpError> {
-    use gtk::prelude::*;
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
-
-    let event = DRAG_GESTURE
-        .with(|gesture| {
-            gesture
-                .borrow()
-                .as_ref()
-                .map(|gesture| gesture.event.clone())
-        })
-        .ok_or_else(|| {
-            SftpError::LocalIoError(
-                "Mouse gesture ended. Drag the prepared files again while holding the left button."
-                    .into(),
-            )
-        })?;
-    if NATIVE_DRAG_ACTIVE.with(|active| active.get()) {
-        return Err(SftpError::LocalIoError(
-            "A desktop drag is already active".into(),
-        ));
-    }
-    let uris: Vec<String> = files
-        .iter()
-        .map(|path| {
-            gtk::glib::filename_to_uri(path, None)
-                .map(|uri| uri.to_string())
-                .map_err(|e| SftpError::LocalIoError(e.to_string()))
-        })
-        .collect::<Result<_, _>>()?;
-    let handlers = Rc::new(RefCell::new(Vec::<gtk::glib::SignalHandlerId>::new()));
-    let failed = Rc::new(Cell::new(false));
-    let supplied = Rc::new(Cell::new(false));
-    let finished = Rc::new(Cell::new(false));
-    let timer = Rc::new(RefCell::new(None::<gtk::glib::SourceId>));
-    window.drag_source_set(
-        gtk::gdk::ModifierType::BUTTON1_MASK,
-        &[],
-        gtk::gdk::DragAction::COPY,
-    );
-    window.drag_source_add_uri_targets();
-
-    let supplied_data = supplied.clone();
-    handlers
-        .borrow_mut()
-        .push(window.connect_drag_data_get(move |_, _, data, _, _| {
-            let uris: Vec<&str> = uris.iter().map(String::as_str).collect();
-            supplied_data.set(data.set_uris(&uris));
-        }));
-    let failed_drag = failed.clone();
-    handlers
-        .borrow_mut()
-        .push(window.connect_drag_failed(move |_, _, _| {
-            failed_drag.set(true);
-            gtk::glib::Propagation::Proceed
-        }));
-    let timeout_result = result.clone();
-    let handlers_end = handlers.clone();
-    let finished_end = finished.clone();
-    let timer_end = timer.clone();
-    handlers
-        .borrow_mut()
-        .push(window.connect_drag_end(move |widget, context| {
-            finished_end.set(true);
-            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
-            NATIVE_DRAG_CONTEXT.with(|context| context.borrow_mut().take());
-            let dropped = !failed.get() && supplied.get() && !context.selected_action().is_empty();
-            for id in handlers_end.borrow_mut().drain(..) {
-                widget.disconnect(id);
-            }
-            widget.drag_source_unset();
-            if let Some(source) = timer_end.borrow_mut().take() {
-                source.remove();
-            }
-            let _ = result.send(Ok(dropped));
-        }));
-    NATIVE_DRAG_ACTIVE.with(|active| active.set(true));
-    let context = window.drag_source_get_target_list().and_then(|targets| {
-        // GTK expects button number 1, not the BUTTON1_MASK bit flag.
-        window.drag_begin_with_coordinates(
-            &targets,
-            gtk::gdk::DragAction::COPY,
-            1,
-            Some(&event),
-            -1,
-            -1,
-        )
-    });
-    match context {
-        Some(context) => {
-            NATIVE_DRAG_CONTEXT
-                .with(|active| *active.borrow_mut() = Some((preparation_id, context.clone())));
-            context.drag_set_icon_name("document-save", 0, 0);
-            let timer_timeout = timer.clone();
-            let timeout_window = window.clone();
-            let timeout_handlers = handlers.clone();
-            *timer.borrow_mut() = Some(gtk::glib::timeout_add_local_once(
-                Duration::from_secs(45),
-                move || {
-                    timer_timeout.borrow_mut().take();
-                    if !finished.get() {
-                        context.drag_cancel();
-                        if !finished.replace(true) {
-                            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
-                            NATIVE_DRAG_CONTEXT.with(|active| active.borrow_mut().take());
-                            for id in timeout_handlers.borrow_mut().drain(..) {
-                                timeout_window.disconnect(id);
-                            }
-                            timeout_window.drag_source_unset();
-                            let _ = timeout_result.send(Err(SftpError::LocalIoError("Desktop drag timed out. The prepared files are available for another attempt.".into())));
-                        }
-                    }
-                },
-            ));
-            Ok(())
-        }
-        None => {
-            NATIVE_DRAG_ACTIVE.with(|active| active.set(false));
-            for id in handlers.borrow_mut().drain(..) {
-                window.disconnect(id);
-            }
-            window.drag_source_unset();
-            Err(SftpError::LocalIoError("Could not start desktop drag. Use the Ready download button with a fresh mouse gesture.".into()))
-        }
-    }
-}
-
-/// Run the native OS drag on the GTK/main thread, with a bounded completion wait.
+/// Run the native OS drag on the main thread with already-staged file paths,
+/// resolving to `true` if the drag ended in a drop. Mirrors how
+/// `tauri-plugin-drag` drives the `drag` crate, but the path list is fixed by
+/// the backend (only validated staging paths) rather than accepted from the
+/// webview — so a compromised webview can't drag arbitrary local files.
+///
+/// Platform note: the `drag` crate's GTK backend is X11-oriented and best-effort
+/// under Wayland. The `drag` callback (Dropped/Cancel) is the only completion
+/// signal we await, so if a platform fails to fire it the command stays pending
+/// for that drag; the frontend's re-entrancy guard still recovers on the next
+/// attempt and staged files are reaped by `sweep_stale_dragout`.
 async fn start_native_drag(
     app: AppHandle,
     window: Window,
     files: Vec<PathBuf>,
-    preparation_id: String,
 ) -> Result<bool, SftpError> {
-    #[cfg(not(target_os = "linux"))]
-    let _ = preparation_id;
-    #[cfg(not(target_os = "linux"))]
     let icon_bytes = DRAG_ICON_PNG.to_vec();
 
     tokio::task::spawn_blocking(move || -> Result<bool, SftpError> {
@@ -1298,9 +1124,6 @@ async fn start_native_drag(
 
             match raw_window {
                 Ok(w) => {
-                    #[cfg(target_os = "linux")]
-                    let started = start_gtk_drag(&w, files, preparation_id, tx_cb);
-                    #[cfg(not(target_os = "linux"))]
                     let started = drag::start_drag(
                         &w,
                         drag::DragItem::Files(files),
@@ -1325,151 +1148,29 @@ async fn start_native_drag(
         })
         .map_err(|e| SftpError::LocalIoError(format!("main-thread dispatch failed: {e}")))?;
 
-        rx.recv_timeout(Duration::from_secs(60))
-            .map_err(|e| SftpError::LocalIoError(format!("drag did not finish: {e}")))?
+        rx.recv()
+            .map_err(|e| SftpError::LocalIoError(format!("drag result channel closed: {e}")))?
     })
     .await
     .map_err(|e| SftpError::LocalIoError(format!("drag task failed: {e}")))?
 }
 
-async fn wait_for_drag_preparation<F>(
-    preparation: F,
-    cancel: &CancellationToken,
-    timeout: Duration,
-) -> Result<Vec<PathBuf>, SftpError>
-where
-    F: std::future::Future<Output = Result<Vec<PathBuf>, SftpError>>,
-{
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => Err(SftpError::TransferCancelled),
-        result = tokio::time::timeout(timeout, preparation) => result.unwrap_or_else(|_| Err(SftpError::LocalIoError("Preparing the download timed out; try a smaller selection.".into()))),
-    }
-}
-
-/// Download the selection before handing real file paths to the desktop.
+/// Stage the selected remote files/folders to a private temp dir and start a
+/// native OS drag-out (download to desktop/Finder), resolving once the drag
+/// ends. Returns whether it ended in a drop and how many top-level items moved.
+///
+/// Unlike `sftp_download` (fire-and-forget, streams progress) the OS drag API
+/// needs real, fully-written local file handles *before* the drag begins, so
+/// this stages every byte first. Directories are copied recursively. Staging
+/// runs entirely in the backend and the drag is handed only validated staging
+/// paths — the webview never names a path, so it can't drag arbitrary files.
+///
+/// Cleanup: on cancel the staged tree is removed immediately (nothing was
+/// copied out); on a drop we leave it for the OS to finish copying and reap it
+/// on a later drag via `sweep_stale_dragout` (the OS gives no copy-complete
+/// signal). Failures remove the partial tree before returning.
 #[tauri::command]
-pub async fn sftp_prepare_drag_out(
-    sftp_session_id: String,
-    remote_paths: Vec<String>,
-    preparation_id: Option<String>,
-    sftp_manager: State<'_, Arc<SftpManager>>,
-) -> Result<String, SftpError> {
-    let sftp_arc = sftp_manager.get_session(&sftp_session_id)?.sftp.clone();
-    let root = std::env::temp_dir().join("anyscp-dragout");
-    sftp_manager
-        .prepared_drags
-        .retain(|_, (owner, _, _)| owner != &sftp_session_id);
-    if sftp_manager.prepared_drags.len() >= 64 {
-        return Err(SftpError::InvalidPath(
-            "Too many prepared downloads. Try again later.".into(),
-        ));
-    }
-    let token = match preparation_id {
-        Some(id) => uuid::Uuid::parse_str(&id)
-            .map_err(|_| SftpError::InvalidPath("Invalid preparation ID".into()))?
-            .to_string(),
-        None => uuid::Uuid::new_v4().to_string(),
-    };
-    let cancel = CancellationToken::new();
-    sftp_manager
-        .drag_preparations
-        .insert(token.clone(), (sftp_session_id.clone(), cancel.clone()));
-    let stage = root.join(&token);
-    let prepared = async {
-        sweep_stale_dragout(&root).await;
-        create_private_dir(&stage).await?;
-        stage_entries(&sftp_arc, &remote_paths, &stage).await
-    };
-    let result = wait_for_drag_preparation(prepared, &cancel, Duration::from_secs(120)).await;
-    sftp_manager.drag_preparations.remove(&token);
-    let files = match result {
-        Ok(files) if !files.is_empty() => files,
-        Ok(_) => {
-            let _ = tokio::fs::remove_dir_all(&stage).await;
-            return Err(SftpError::InvalidPath("No files selected".into()));
-        }
-        Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&stage).await;
-            return Err(error);
-        }
-    };
-    sftp_manager
-        .prepared_drags
-        .insert(token.clone(), (sftp_session_id, stage, files));
-    Ok(token)
-}
-
-/// Start the native drag synchronously with a fresh pointer gesture.
-#[tauri::command]
-pub async fn sftp_start_drag_out(
-    app: AppHandle,
-    window: Window,
-    sftp_session_id: String,
-    prepared_id: String,
-    sftp_manager: State<'_, Arc<SftpManager>>,
-) -> Result<DragOutResult, SftpError> {
-    let entry = sftp_manager.prepared_drags.entry(prepared_id.clone());
-    let (_, _stage, files) = match entry {
-        dashmap::mapref::entry::Entry::Occupied(entry) if entry.get().0 == sftp_session_id => {
-            entry.get().clone()
-        }
-        _ => {
-            return Err(SftpError::InvalidPath(
-                "Prepared download expired. Drag the files again.".into(),
-            ))
-        }
-    };
-    let count = files.len();
-    let result = start_native_drag(app, window, files, prepared_id).await;
-    // Retain the prepared bytes for a fresh gesture after a cancelled/failed
-    // native drag. The next preparation or the staging sweep retires them.
-    result.map(|dropped| DragOutResult { dropped, count })
-}
-
-#[tauri::command]
-pub async fn sftp_cancel_drag_out(
-    sftp_session_id: String,
-    preparation_id: String,
-    sftp_manager: State<'_, Arc<SftpManager>>,
-    app: AppHandle,
-) -> Result<(), SftpError> {
-    if let Some(preparation) = sftp_manager.drag_preparations.get(&preparation_id) {
-        if preparation.0 == sftp_session_id {
-            preparation.1.cancel();
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let id = preparation_id.clone();
-        app.run_on_main_thread(move || {
-            use gtk::prelude::*;
-            let context = NATIVE_DRAG_CONTEXT.with(|active| {
-                active
-                    .borrow()
-                    .as_ref()
-                    .filter(|(active_id, _)| active_id == &id)
-                    .map(|(_, context)| context.clone())
-            });
-            if let Some(context) = context {
-                context.drag_cancel();
-            }
-        })
-        .map_err(|e| SftpError::LocalIoError(e.to_string()))?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = app;
-    let entry = sftp_manager.prepared_drags.entry(preparation_id);
-    if let dashmap::mapref::entry::Entry::Occupied(entry) = entry {
-        if entry.get().0 == sftp_session_id {
-            entry.remove();
-        }
-    }
-    Ok(())
-}
-
-// Retained for callers using the original single-step command.
-#[tauri::command]
+#[instrument(skip(app, window, sftp_manager), fields(sftp_session_id = %sftp_session_id))]
 pub async fn sftp_drag_out(
     app: AppHandle,
     window: Window,
@@ -1477,14 +1178,50 @@ pub async fn sftp_drag_out(
     remote_paths: Vec<String>,
     sftp_manager: State<'_, Arc<SftpManager>>,
 ) -> Result<DragOutResult, SftpError> {
-    let prepared_id = sftp_prepare_drag_out(
-        sftp_session_id.clone(),
-        remote_paths,
-        None,
-        sftp_manager.clone(),
-    )
-    .await?;
-    sftp_start_drag_out(app, window, sftp_session_id, prepared_id, sftp_manager).await
+    let sftp_arc = {
+        let session_ref = sftp_manager.get_session(&sftp_session_id)?;
+        session_ref.sftp.clone()
+    };
+
+    let dragout_root = std::env::temp_dir().join("anyscp-dragout");
+    sweep_stale_dragout(&dragout_root).await;
+
+    let stage = dragout_root.join(uuid::Uuid::new_v4().to_string());
+    create_private_dir(&stage).await?;
+
+    // Stage everything; on any failure remove the partial tree so a broken drag
+    // doesn't leak bytes into temp.
+    let files = match stage_entries(&sftp_arc, &remote_paths, &stage).await {
+        Ok(files) => files,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&stage).await;
+            return Err(e);
+        }
+    };
+
+    if files.is_empty() {
+        let _ = tokio::fs::remove_dir_all(&stage).await;
+        return Ok(DragOutResult {
+            dropped: false,
+            count: 0,
+        });
+    }
+
+    let count = files.len();
+    let dropped = match start_native_drag(app, window, files).await {
+        Ok(dropped) => dropped,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&stage).await;
+            return Err(e);
+        }
+    };
+
+    if !dropped {
+        // Cancelled — nothing was copied out, so reclaim the space now.
+        let _ = tokio::fs::remove_dir_all(&stage).await;
+    }
+
+    Ok(DragOutResult { dropped, count })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2277,41 +2014,6 @@ pub async fn sftp_set_concurrency(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn cancelled_preparation_does_not_wait_for_the_remote_server() {
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let result =
-            wait_for_drag_preparation(std::future::pending(), &cancel, Duration::from_secs(120))
-                .await;
-        assert!(matches!(result, Err(SftpError::TransferCancelled)));
-    }
-
-    #[tokio::test]
-    async fn unresponsive_preparation_has_a_deadline() {
-        let result = wait_for_drag_preparation(
-            std::future::pending(),
-            &CancellationToken::new(),
-            Duration::from_millis(1),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(SftpError::LocalIoError(message)) if message.contains("timed out"))
-        );
-    }
-
-    #[test]
-    fn closing_a_browser_cancels_its_pending_download_preparation() {
-        let manager = SftpManager::new();
-        let cancel = CancellationToken::new();
-        manager
-            .drag_preparations
-            .insert("preparation".into(), ("browser".into(), cancel.clone()));
-        manager.remove_session("browser");
-        assert!(cancel.is_cancelled());
-        assert!(manager.drag_preparations.is_empty());
-    }
 
     #[test]
     fn chmod_attrs_sets_only_permissions() {

@@ -86,9 +86,7 @@ interface ExplorerFileTableProps {
    *  folders alike. Triggered by a primary-modifier drag (⌘ on macOS, Ctrl
    *  elsewhere); a plain drag stays an in-app move. Absent for providers
    *  without OS drag-out support (e.g. SCP/S3). */
-  onPrepareDragOut?: (entries: ExplorerEntry[]) => void;
-  onCancelDragPreparation?: () => void;
-  onDragOut?: (entries: ExplorerEntry[], releasePointer?: () => void) => void | Promise<void>;
+  onDragOut?: (entries: ExplorerEntry[]) => void;
   /** Current directory path/prefix. Used to reset scroll on navigation while
    *  preserving it across same-directory refreshes (e.g. after a chmod). */
   currentPath?: string;
@@ -361,8 +359,6 @@ export function ExplorerFileTable({
   onMoveEntries,
   onCopyEntries,
   onDragOut,
-  onPrepareDragOut,
-  onCancelDragPreparation,
   currentPath,
   loading,
 }: ExplorerFileTableProps) {
@@ -385,8 +381,6 @@ export function ExplorerFileTable({
   // Drag-and-drop state (internal move). The OS-level Tauri drag-drop handler is
   // enabled (for file-drop uploads), which suppresses HTML5 drag events in the
   // webview — so internal move/copy is driven by pointer events, not `draggable`.
-  const pointerDragCleanup = useRef<(() => void) | null>(null);
-  useEffect(() => () => pointerDragCleanup.current?.(), []);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragGhost, setDragGhost] = useState<{
     x: number;
@@ -590,7 +584,6 @@ export function ExplorerFileTable({
       if (!(caps.canInternalDragMove || onDragOut)) return;
       if ((e.target as HTMLElement).closest("input")) return;
 
-      pointerDragCleanup.current?.();
       const dragEntries =
         selectedIds.has(entry.id) && selectedIds.size > 1
           ? selectedEntries
@@ -599,11 +592,6 @@ export function ExplorerFileTable({
       const startY = e.clientY;
       let started = false;
       let moving = false;
-      const source = e.currentTarget;
-      const pointerId = e.pointerId;
-      const releaseCapture = () => {
-        try { if (source.hasPointerCapture?.(pointerId)) source.releasePointerCapture(pointerId); } catch { /* The pointer may already be released. */ }
-      };
 
       // Resolve the directory row under a point to a valid drop target id, or
       // null (not a dir, or dropping onto self / into the dragged subtree).
@@ -631,35 +619,30 @@ export function ExplorerFileTable({
       const dragOut = () => {
         if (handedOff || !onDragOut) return;
         handedOff = true;
-        void Promise.resolve(onDragOut(dragEntries, teardown)).catch(() => {}).finally(teardown);
+        teardown();
+        onDragOut(dragEntries);
       };
 
       const onMove = (ev: PointerEvent) => {
         if (!started) {
           if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return;
           started = true;
-          try { source.setPointerCapture?.(pointerId); } catch { /* Native capture remains available. */ }
-          onPrepareDragOut?.(dragEntries);
-          setDragGhost({ x: ev.clientX, y: ev.clientY, count: dragEntries.length, copy: ev.altKey });
           // Providers that can't move in-app (none today) can only download.
-          if (!caps.canInternalDragMove || ((ev.ctrlKey || ev.metaKey) && onDragOut)) {
+          if (!caps.canInternalDragMove) {
             dragOut();
             return;
           }
           moving = true;
         }
-        if (moving && !handedOff) {
-          // Prepare within the webview, then begin the native drag before the
-          // pointer loses its source window. Folder targets keep internal moves.
+        if (moving) {
           // Crossing the window edge = dragging toward the desktop/Finder →
           // download. Otherwise it's an in-app move/copy onto a folder row.
           if (
             onDragOut &&
-            !folderTargetAt(ev.clientX, ev.clientY) &&
-            (ev.clientX <= 24 ||
-              ev.clientY <= 24 ||
-              ev.clientX >= window.innerWidth - 24 ||
-              ev.clientY >= window.innerHeight - 24)
+            (ev.clientX <= 0 ||
+              ev.clientY <= 0 ||
+              ev.clientX >= window.innerWidth ||
+              ev.clientY >= window.innerHeight)
           ) {
             dragOut();
             return;
@@ -683,17 +666,11 @@ export function ExplorerFileTable({
       // Reflect Alt (copy) the instant it's pressed/released, without waiting for
       // the next pointer move.
       const onKey = (ev: KeyboardEvent) => {
-        if (ev.key === "Escape") {
-          ev.preventDefault();
-          onCancelDragPreparation?.();
-          teardown();
-          return;
-        }
         if (moving) setDragGhost((g) => (g ? { ...g, copy: ev.altKey } : g));
       };
 
       const onUp = (ev: PointerEvent) => {
-        if (moving && !handedOff) {
+        if (moving) {
           const targetId = folderTargetAt(ev.clientX, ev.clientY);
           if (targetId) {
             const handler = ev.altKey ? onCopyEntries : onMoveEntries;
@@ -707,13 +684,8 @@ export function ExplorerFileTable({
       };
 
       function teardown() {
-        releaseCapture();
-        if (started && !handedOff) onCancelDragPreparation?.();
-        pointerDragCleanup.current = null;
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", teardown);
-        window.removeEventListener("blur", teardown);
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("keyup", onKey);
         document.removeEventListener("mouseleave", onWindowLeave);
@@ -721,11 +693,8 @@ export function ExplorerFileTable({
         setDragGhost(null);
       }
 
-      pointerDragCleanup.current = teardown;
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", teardown);
-      window.addEventListener("blur", teardown);
       window.addEventListener("keydown", onKey);
       window.addEventListener("keyup", onKey);
       document.addEventListener("mouseleave", onWindowLeave);
@@ -733,8 +702,6 @@ export function ExplorerFileTable({
     [
       caps.canInternalDragMove,
       onDragOut,
-      onPrepareDragOut,
-      onCancelDragPreparation,
       onMoveEntries,
       onCopyEntries,
       selectedIds,

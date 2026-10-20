@@ -155,17 +155,13 @@ pub fn run() {
                 "document.documentElement.dataset.theme = {theme:?}; document.documentElement.style.setProperty('--accent-hue', '{accent_hue}');{custom_accent_script}{font_script}{mono_font_script}"
             );
 
-            let main_window = WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::App("index.html".into()))
+            WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::App("index.html".into()))
                 .title("anySCP")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(800.0, 500.0)
                 .initialization_script(&theme_script)
                 .build()
                 .map_err(|e| format!("failed to create main window: {e}"))?;
-            #[cfg(target_os = "linux")]
-            sftp::commands::track_drag_gestures(&main_window)?;
-            #[cfg(not(target_os = "linux"))]
-            let _ = main_window;
 
             let host_db = Arc::new(host_db);
             let mcp_state = mcp::McpState::new(host_db.clone())?;
@@ -228,9 +224,6 @@ pub fn run() {
             // SFTP — legacy direct transfers (kept for VS Code edit workflow)
             sftp::commands::sftp_download,
             sftp::commands::sftp_drag_out,
-            sftp::commands::sftp_prepare_drag_out,
-            sftp::commands::sftp_start_drag_out,
-            sftp::commands::sftp_cancel_drag_out,
             sftp::commands::sftp_upload,
             sftp::commands::sftp_cancel_transfer,
             sftp::commands::sftp_edit_external,

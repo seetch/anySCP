@@ -144,8 +144,6 @@ The file browser sends SSH keepalive probes every 30 seconds by default (includi
 
 SFTP/SCP navigation includes Back, Forward, Parent and a recent-directory menu, with Alt+Left/Right/Up shortcuts. The last 20 visited directories are saved per host and suggested in the path field. The SSH terminal button opens an independent console in the current directory: a resizable right pane in a maximized/fullscreen window, otherwise a separate application window. Repeated clicks show/hide that same console, preserving its SSH connection, running commands, scrollback and working directory. Closing the console hides it; closing its explorer tab releases the connection.
 
-Drop local files or folders on a remote directory to upload there, with an overwrite prompt. Drag remote selections out of the window, or use Ctrl/Cmd+drag, to download. File preparation begins while the pointer is still inside the browser; the original GTK button event is retained for Wayland and the gesture stays captured until handoff. Preparation has a Cancel button and a 120-second deadline. The preparing indicator ends as soon as the files are ready, independently of the desktop drag. If you release the mouse early, drag the file again or use Ready download. Cancelled desktop drags retain their prepared bytes for retry. Linux drag-out uses GTK directly, with escaped file URIs and data retained until the receiving application finishes. Desktop integration under Wayland still needs a manual check. The regular Download action remains available.
-
 
 ## 📸 Screenshots
 
