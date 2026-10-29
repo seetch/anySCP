@@ -307,7 +307,11 @@ impl ScpTransferManager {
         scp_session_id: String,
         remote_paths: Vec<String>,
         local_dir: PathBuf,
+        local_path: Option<PathBuf>,
     ) -> Result<Vec<String>, ScpError> {
+        if local_path.is_some() && remote_paths.len() != 1 {
+            return Err(ScpError::RemoteError("Choose one file for a custom destination".into()));
+        }
         self.ensure_worker_spawned();
         let (handle, flavor) = {
             let session = self.scp_manager.get_session(&scp_session_id)?;
@@ -325,7 +329,7 @@ impl ScpTransferManager {
                 .await?
                 .ok_or_else(|| ScpError::NotFound(remote_path.clone()))?;
 
-            let local_dest = local_dir.join(&name);
+            let local_dest = local_path.clone().unwrap_or_else(|| local_dir.join(&name));
             let job = if stat.entry_type == super::ScpEntryType::Directory {
                 let (bytes, count) = exec::dir_stats(handle.clone(), flavor, &remote_path).await?;
                 Self::new_job(

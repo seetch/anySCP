@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   Upload,
@@ -116,11 +117,35 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
   const [isEditing, setIsEditing] = useState(false);
   const [draftPath, setDraftPath] = useState(currentPath);
   const inputRef = useRef<HTMLInputElement>(null);
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const [suggestionIndex, setSuggestionIndex] = useState(-1);
+  const [menuRect, setMenuRect] = useState<DOMRect | null>(null);
+  const suggestions = isEditing && !showHistory
+    ? recentPaths.filter((path) => path.toLowerCase().includes(draftPath === currentPath ? "" : draftPath.toLowerCase()))
+    : recentPaths;
+  const choosePath = (path: string) => {
+    setShowHistory(false);
+    setIsEditing(false);
+    setDraftPath(path);
+    setSuggestionIndex(-1);
+    onNavigate(normalizePath(providerType, path));
+  };
+  useEffect(() => {
+    if (!isEditing && !showHistory) return;
+    const position = () => setMenuRect((isEditing ? inputRef.current : historyRef.current)?.getBoundingClientRect() ?? null);
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [isEditing, showHistory]);
 
   useEffect(() => {
     if (!showHistory) return;
     const close = (event: PointerEvent) => {
-      if (!historyRef.current?.contains(event.target as Node)) setShowHistory(false);
+      if (!historyRef.current?.contains(event.target as Node) && !suggestionsRef.current?.contains(event.target as Node)) setShowHistory(false);
     };
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setShowHistory(false); };
     document.addEventListener("pointerdown", close);
@@ -163,15 +188,19 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
   }, [currentPath]);
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        inputRef.current?.blur();
+        setSuggestionIndex((index) => Math.max(0, Math.min(suggestions.length - 1, index + (e.key === "ArrowDown" ? 1 : -1))));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (suggestionIndex >= 0 && suggestions[suggestionIndex]) choosePath(suggestions[suggestionIndex]);
+        else inputRef.current?.blur();
       } else if (e.key === "Escape") {
         e.preventDefault();
         cancelEdit();
       }
     },
-    [cancelEdit],
+    [cancelEdit, suggestions, suggestionIndex, choosePath],
   );
   const handleHome = useCallback(
     () => onNavigate(providerType === "sftp" ? "/" : ""),
@@ -187,11 +216,8 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
         <button data-testid="explorer-forward" onClick={onForward} disabled={loading || !onForward} title="Forward (Alt+Right)" aria-label="Go forward" className={ICON_BTN_CLASS}><ArrowRight size={15} /></button>
         <button data-testid="explorer-up" onClick={() => onNavigate(provider.parentPath(currentPath))} disabled={loading || isAtRoot} title="Parent directory (Alt+Up)" aria-label="Go to parent directory" className={ICON_BTN_CLASS}><ArrowUp size={15} /></button>
         <div className="relative shrink-0" ref={historyRef}>
-          <button data-testid="explorer-history" onClick={() => setShowHistory((v) => !v)} disabled={loading || recentPaths.length === 0} title="Recent directories" aria-label="Recent directories" aria-expanded={showHistory} className={ICON_BTN_CLASS}><History size={15} /></button>
-          {showHistory && <div className="absolute top-full left-0 mt-1 z-40 min-w-64 max-w-96 max-h-64 overflow-auto rounded-md border border-border bg-bg-surface p-1 shadow-lg">
-            <p className="px-2 py-1 text-text-muted text-[length:var(--text-xs)]">Recent directories</p>
-            {recentPaths.map((path) => <button key={path} title={path} className="block w-full truncate text-left px-2 py-1.5 rounded text-[length:var(--text-sm)] text-text-primary hover:bg-bg-subtle" onClick={() => { setShowHistory(false); onNavigate(path); }}>{path}</button>)}
-          </div>}
+          <button data-testid="explorer-history" onPointerDown={(event) => event.preventDefault()} onClick={() => setShowHistory((v) => !v)} disabled={loading || recentPaths.length === 0} title="Recent directories" aria-label="Recent directories" aria-expanded={showHistory} className={ICON_BTN_CLASS}><History size={15} /></button>
+
         </div>
       </>}
       {/* Home button */}
@@ -206,7 +232,11 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
         <Home size={15} strokeWidth={1.8} aria-hidden="true" />
       </button>
 
-      {recentPaths.length > 0 && <datalist id={`explorer-paths-${provider.sessionId}`}>{recentPaths.map((path) => <option key={path} value={path} />)}</datalist>}
+      {(showHistory || isEditing) && suggestions.length > 0 && menuRect && createPortal(
+        <div ref={suggestionsRef} role="listbox" aria-label="Recent directories" className="fixed z-[100] overflow-auto rounded-lg border border-border bg-bg-overlay p-1 shadow-[var(--shadow-lg)]" style={{ top: menuRect.bottom + 4, left: Math.max(8, Math.min(menuRect.left, window.innerWidth - 328)), width: Math.min(Math.max(menuRect.width, 320), window.innerWidth - 16), maxHeight: Math.max(80, Math.min(256, window.innerHeight - menuRect.bottom - 12)) }} onPointerDown={(event) => event.preventDefault()}>
+          <p className="px-2 py-1 text-text-muted text-[length:var(--text-xs)]">Recent directories</p>
+          {suggestions.map((path, index) => <button key={path} type="button" role="option" aria-selected={index === suggestionIndex} title={path} className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-left text-[length:var(--text-sm)] text-text-primary hover:bg-bg-subtle ${index === suggestionIndex ? "bg-bg-subtle" : ""}`} onClick={() => choosePath(path)}><History size={14} className="shrink-0 text-text-muted" /><span className="truncate font-mono">{path}</span></button>)}
+        </div>, document.body)}
       {/* Breadcrumb path */}
       {isEditing ? (
         <input
@@ -214,10 +244,10 @@ export const ExplorerToolbar = memo(function ExplorerToolbar({
           data-testid="explorer-path-input"
           type="text"
           value={draftPath}
-          onChange={(e) => setDraftPath(e.target.value)}
+          onChange={(e) => { setDraftPath(e.target.value); setSuggestionIndex(-1); }}
           onBlur={commitEdit}
           onKeyDown={handleInputKeyDown}
-          list={recentPaths.length ? `explorer-paths-${provider.sessionId}` : undefined}
+          autoComplete="off"
           spellCheck={false}
           autoCorrect="off"
           autoCapitalize="off"

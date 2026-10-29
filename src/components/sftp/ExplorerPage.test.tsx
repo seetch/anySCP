@@ -54,46 +54,44 @@ describe("file browser SSH terminal", () => {
     expect(terminalUnmount).not.toHaveBeenCalled();
   });
 
-  it("shows the same docked session again, preserving its original directory until the tab closes", async () => {
+  it("reopens the docked console in the current directory", async () => {
     isMaximized.mockResolvedValue(true);
     const { unmount } = render(<ExplorerPage sftpSessionId="sftp-1" />);
     const toggle = screen.getByTestId("explorer-terminal");
     fireEvent.click(toggle);
     expect(await screen.findByTestId("console")).toBeVisible();
     await waitFor(() => expect(terminalMount).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toggle).toBeEnabled());
     fireEvent.click(toggle);
-    expect(screen.getByTestId("console")).not.toBeVisible();
+    await waitFor(() => expect(screen.getByTestId("console")).not.toBeVisible());
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
     useSftpStore.getState().setEntries("sftp-1", "/other-directory", []);
     fireEvent.click(toggle);
-    expect(screen.getByTestId("console")).toBeVisible();
-    expect(screen.getByTestId("console")).toHaveTextContent("/srv/project");
+    await waitFor(() => expect(screen.getByTestId("console")).toBeVisible());
+    expect(screen.getByTestId("console")).toHaveTextContent("/other-directory");
     expect(terminalMount).toHaveBeenCalledTimes(1);
     expect(terminalUnmount).not.toHaveBeenCalled();
+    await waitFor(() => expect(toggle).toBeEnabled());
     fireEvent.click(screen.getByText("Close console"));
     fireEvent.click(toggle);
-    expect(screen.getByTestId("console")).toBeVisible();
+    await waitFor(() => expect(screen.getByTestId("console")).toBeVisible());
     expect(terminalMount).toHaveBeenCalledTimes(1);
     unmount();
     expect(terminalUnmount).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps toggling the same detached window even if the main window becomes maximized", async () => {
+  it("docks a detached console after maximizing the main window", async () => {
     const { unmount } = render(<ExplorerPage sftpSessionId="sftp-1" />);
     const toggle = screen.getByTestId("explorer-terminal");
-    const countToggles = () => invoke.mock.calls.filter(([command]) => command === "open_explorer_terminal_window").length;
     fireEvent.click(toggle);
-    await waitFor(() => expect(countToggles()).toBe(1));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_explorer_terminal_window", expect.anything()));
     await waitFor(() => expect(toggle).toBeEnabled());
     isMaximized.mockResolvedValue(true);
+    useSftpStore.getState().setEntries("sftp-1", "/other-directory", []);
     fireEvent.click(toggle);
-    await waitFor(() => expect(countToggles()).toBe(2));
-    await waitFor(() => expect(toggle).toBeEnabled());
-    fireEvent.click(toggle);
-    await waitFor(() => expect(countToggles()).toBe(3));
-    expect(screen.queryByTestId("console")).not.toBeInTheDocument();
-    expect(invoke.mock.calls.filter(([command]) => command === "open_explorer_terminal_window").map((call) => call[1])).toEqual(Array(3).fill({ explorerSessionId: "sftp-1", hostId: "host-1", path: "/srv/project" }));
-    unmount();
+    expect(await screen.findByTestId("console")).toHaveTextContent("/other-directory");
     expect(invoke).toHaveBeenCalledWith("close_explorer_terminal_window", { explorerSessionId: "sftp-1" });
+    expect(invoke.mock.calls.filter(([command]) => command === "open_explorer_terminal_window")).toHaveLength(1);
+    unmount();
   });
 });

@@ -317,7 +317,11 @@ impl TransferManager {
         sftp_session_id: String,
         remote_paths: Vec<String>,
         local_dir: PathBuf,
+        local_path: Option<PathBuf>,
     ) -> Result<Vec<String>, SftpError> {
+        if local_path.is_some() && remote_paths.len() != 1 {
+            return Err(SftpError::InvalidPath("Choose one file for a custom destination".into()));
+        }
         self.ensure_worker_spawned();
         let sftp_arc = {
             let session_ref = self.sftp_manager.get_session(&sftp_session_id)?;
@@ -345,7 +349,7 @@ impl TransferManager {
 
             let is_dir = attrs.file_type() == russh_sftp::protocol::FileType::Dir;
             let (kind, total_bytes, files_total) = if is_dir {
-                let local_dest = local_dir.join(&name);
+                let local_dest = local_path.clone().unwrap_or_else(|| local_dir.join(&name));
                 // Total are unknown until the background stat walk
                 // start at 0 so the job appears in the UI immediately
                 (
@@ -357,7 +361,7 @@ impl TransferManager {
                     0u32,
                 )
             } else {
-                let local_dest = local_dir.join(&name);
+                let local_dest = local_path.clone().unwrap_or_else(|| local_dir.join(&name));
                 let size = attrs.size.unwrap_or(0);
                 (
                     TransferJobKind::DownloadFile {

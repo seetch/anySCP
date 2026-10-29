@@ -1,3 +1,4 @@
+import { useTransferStore } from "../../stores/transfer-store";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertCircle } from "lucide-react";
@@ -429,6 +430,7 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
           title: `Download "${entry.name}" to…`,
         }) as string | null;
         if (!localDir) return;
+        useTransferStore.getState().setPopoverOpen(true);
 
         await explorerInvoke(transport, "enqueue_download", sessionId, {
           remotePaths: [entry.id],
@@ -442,15 +444,15 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         });
         if (!savePath) return;
 
-        // Use the single-file download API with the full user-chosen path,
-        // so a renamed file is saved under the name the user picked.
-        await explorerInvoke(transport, "download", sessionId, {
-          remotePath: entry.id,
+        useTransferStore.getState().setPopoverOpen(true);
+        await explorerInvoke(transport, "enqueue_download", sessionId, {
+          remotePaths: [entry.id],
+          localDir: "",
           localPath: savePath,
         });
       }
     } catch (err) {
-      console.error("Download failed:", err);
+      toast.error(`Download failed: ${errorMessage(err)}`);
     }
   }, [sessionId, transport]);
 
@@ -468,13 +470,14 @@ export function ExplorerView({ sessionId, transport = "sftp", isActive = true }:
         title: `Download ${entries.length} items to…`,
       }) as string | null;
       if (!localDir) return;
+      useTransferStore.getState().setPopoverOpen(true);
 
       await explorerInvoke(transport, "enqueue_download", sessionId, {
         remotePaths: entries.map((e) => e.id),
         localDir,
       });
     } catch (err) {
-      console.error("Download failed:", err);
+      toast.error(`Download failed: ${errorMessage(err)}`);
     }
   }, [sessionId, transport]);
 

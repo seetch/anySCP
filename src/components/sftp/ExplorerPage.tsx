@@ -27,6 +27,7 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
   const [consolePath, setConsolePath] = useState<string | null>(null);
   const [consoleVisible, setConsoleVisible] = useState(false);
   const consoleWindowOpened = useRef(false);
+  const detachedPath = useRef<string | null>(null);
   const consoleMounted = useRef(true);
   const [openingConsole, setOpeningConsole] = useState(false);
   const [consoleWidth, setConsoleWidth] = useState(42);
@@ -43,19 +44,37 @@ export function ExplorerPage({ sftpSessionId, transport = "sftp", s3SessionId, i
     };
   }, [sftpSessionId]);
   const openConsole = async () => {
-    if (!sftpSession?.hostId || openingConsole) return;
-    if (consolePath !== null) { setConsoleVisible((visible) => !visible); return; }
+    const currentSession = sftpSessionId ? useSftpStore.getState().sessions.get(sftpSessionId) : null;
+    if (!currentSession?.hostId || openingConsole) return;
     setOpeningConsole(true);
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const appWindow = getCurrentWindow();
-      if (!consoleWindowOpened.current && (await appWindow.isMaximized() || await appWindow.isFullscreen())) {
+      const docked = await appWindow.isMaximized() || await appWindow.isFullscreen();
+      if (!consoleMounted.current) return;
+      if (docked) {
+        if (consoleWindowOpened.current) {
+          await invoke("close_explorer_terminal_window", { explorerSessionId: sftpSessionId });
+          consoleWindowOpened.current = false;
+          detachedPath.current = null;
+        }
         if (!consoleMounted.current) return;
-        setConsolePath(sftpSession.currentPath);
-        setConsoleVisible(true);
+        if (consoleVisible && consolePath === currentSession.currentPath) {
+          setConsoleVisible(false);
+        } else {
+          setConsolePath(currentSession.currentPath);
+          setConsoleVisible(true);
+        }
       } else {
-        await invoke("open_explorer_terminal_window", { explorerSessionId: sftpSessionId, hostId: sftpSession.hostId, path: sftpSession.currentPath });
+        if (consoleWindowOpened.current && detachedPath.current !== currentSession.currentPath) {
+          await invoke("close_explorer_terminal_window", { explorerSessionId: sftpSessionId });
+          consoleWindowOpened.current = false;
+        }
+        setConsoleVisible(false);
+        setConsolePath(null);
+        await invoke("open_explorer_terminal_window", { explorerSessionId: sftpSessionId, hostId: currentSession.hostId, path: currentSession.currentPath });
         consoleWindowOpened.current = true;
+        detachedPath.current = currentSession.currentPath;
         if (!consoleMounted.current) {
           await invoke("close_explorer_terminal_window", { explorerSessionId: sftpSessionId });
         }

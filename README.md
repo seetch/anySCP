@@ -142,7 +142,7 @@ Remote UTF-8 text files are limited to 100 MiB (measured in bytes); command outp
 
 The file browser sends SSH keepalive probes every 30 seconds by default (including SFTP-only and ProxyJump connections). Positive host-specific keepalive values override this interval. A lost SFTP channel is reopened when listing a directory; if necessary, saved profiles reconnect using the vault credentials. Writes are never automatically replayed.
 
-SFTP/SCP navigation includes Back, Forward, Parent and a recent-directory menu, with Alt+Left/Right/Up shortcuts. The last 20 visited directories are saved per host and suggested in the path field. The SSH terminal button opens an independent console in the current directory: a resizable right pane in a maximized/fullscreen window, otherwise a separate application window. Repeated clicks show/hide that same console, preserving its SSH connection, running commands, scrollback and working directory. Closing the console hides it; closing its explorer tab releases the connection.
+SFTP/SCP navigation includes Back, Forward, Parent and a recent-directory menu, with Alt+Left/Right/Up shortcuts. The last 20 visited directories are saved per host and suggested in the path field. The SSH terminal button opens an independent console in the current directory: a resizable right pane in a maximized/fullscreen window, otherwise a separate application window. Reopening the console checks the current window mode and browser directory. The same console is preserved when its mode and directory are unchanged; changing either opens a new console in the current directory. Closing the console hides it; closing its explorer tab releases the connection.
 
 
 ## 📸 Screenshots

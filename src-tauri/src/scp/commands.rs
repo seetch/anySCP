@@ -607,11 +607,12 @@ pub async fn scp_enqueue_download(
     scp_session_id: String,
     remote_paths: Vec<String>,
     local_dir: String,
+    local_path: Option<String>,
     transfer_manager: State<'_, Arc<ScpTransferManager>>,
 ) -> Result<Vec<String>, ScpError> {
     let file_count = remote_paths.len();
     let result = transfer_manager
-        .enqueue_download(scp_session_id, remote_paths, PathBuf::from(local_dir))
+        .enqueue_download(scp_session_id, remote_paths, PathBuf::from(local_dir), local_path.map(PathBuf::from))
         .await;
     if result.is_ok() {
         crate::telemetry::capture(
