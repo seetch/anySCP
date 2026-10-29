@@ -242,8 +242,13 @@ impl SshManager {
         Box::pin(async move {
             let Some(jump) = config.jump_host.as_deref() else {
                 // Direct connection — no tunnel.
-                let addr = format!("{}:{}", config.host, config.port);
-                let mut handle = client::connect(russh_config, &addr, SshClientHandler)
+                let socket = tokio::net::TcpStream::connect((config.host.as_str(), config.port))
+                    .await
+                    .map_err(|e| SshError::ConnectionFailed(e.to_string()))?;
+                socket
+                    .set_nodelay(true)
+                    .map_err(|e| SshError::ConnectionFailed(e.to_string()))?;
+                let mut handle = client::connect_stream(russh_config, socket, SshClientHandler)
                     .await
                     .map_err(|e| SshError::ConnectionFailed(e.to_string()))?;
                 Self::authenticate_handle(&mut handle, config).await?;

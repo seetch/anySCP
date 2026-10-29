@@ -1,4 +1,6 @@
 import { Terminal as XTerm } from "@xterm/xterm";
+import { shortcutKey } from "../hooks/use-keyboard-shortcuts";
+import { toast } from "./toast-store";
 import { FitAddon } from "@xterm/addon-fit";
 import { registerSearchAddon, unregisterSearchAddon } from "./terminal-registry";
 import { useSettingsStore } from "./settings-store";
@@ -28,6 +30,8 @@ export interface TerminalEntry {
 }
 
 const instances = new Map<string, TerminalEntry>();
+const tauriCore = import("@tauri-apps/api/core");
+const inputEncoder = new TextEncoder();
 
 /**
  * Open a URL clicked in the terminal via the OS default browser.
@@ -179,29 +183,43 @@ function createEntry(sessionId: string): TerminalEntry {
       /* Web links unavailable */
     });
 
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.metaKey && e.shiftKey && e.key === "s") return false;
-    if (e.metaKey && !e.shiftKey && e.key === "t") return false;
-    if (e.metaKey && !e.shiftKey && e.key === "b") return false;
-    if (e.metaKey && !e.shiftKey && e.key === "w") return false;
-    if (e.metaKey && !e.shiftKey && e.key >= "1" && e.key <= "9") return false;
-    if (e.metaKey && (e.key === "[" || e.key === "]")) return false;
-    if (e.metaKey && !e.shiftKey && e.key === "f") return false;
-    // Cmd+K — snippet palette
-    if (e.metaKey && !e.shiftKey && e.key === "k") return false;
-    if (e.metaKey && e.key.toLowerCase() === "d") return false;
-    if (e.metaKey && e.shiftKey && e.key === "Enter") return false;
-    if (e.metaKey && e.altKey && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key))
-      return false;
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.isComposing) return true;
+    const key = shortcutKey(event);
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.shiftKey && (key === "c" || key === "v")) {
+        event.preventDefault();
+        if (event.type === "keydown") {
+          void import("@tauri-apps/plugin-clipboard-manager").then(async ({ readText, writeText }) => {
+            if (key === "c") {
+              const selection = term.getSelection();
+              if (selection) await writeText(selection);
+            } else {
+              const text = await readText();
+              if (text && instances.get(sessionId)?.term === term) term.paste(text);
+            }
+          }).catch(() => toast.error("Unable to access the clipboard"));
+        }
+        return false;
+      }
+      if (!event.shiftKey) {
+        const control = /^[a-z]$/.test(key) ? String.fromCharCode(key.charCodeAt(0) - 96)
+          : ({ "[": "\x1b", "\\": "\x1c", "]": "\x1d", " ": "\x00" } as Record<string, string>)[key];
+        if (control !== undefined) {
+          event.preventDefault();
+          if (event.type === "keydown") term.input(control, true);
+          return false;
+        }
+      }
+    }
+    if (event.metaKey && ["s", "t", "b", "w", "f", "k", "d", "[", "]", "enter", "1", "2", "3", "4", "5", "6", "7", "8", "9"].includes(key)) return false;
     return true;
   });
 
   term.onData((data) => {
-    (async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const bytes = Array.from(new TextEncoder().encode(data));
-      await invoke("ssh_send_input", { sessionId, data: bytes });
-    })();
+    const bytes = Array.from(inputEncoder.encode(data));
+    void tauriCore.then(({ invoke }) => invoke("ssh_send_input", { sessionId, data: bytes }))
+      .catch(() => toast.error("Unable to send terminal input. Check the SSH connection."));
   });
 
   // Debounce PTY resize requests; the timer lives on the entry (not a closure

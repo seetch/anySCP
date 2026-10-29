@@ -18,11 +18,13 @@ export function useSshOutput(
       const { listen } = await import("@tauri-apps/api/event");
       if (cancelled) return;
 
-      unlisten = await listen<SshOutputPayload>("ssh:output", (event) => {
+      const unsubscribe = await listen<SshOutputPayload>("ssh:output", (event) => {
         if (event.payload.session_id === sessionId) {
           onDataRef.current(new Uint8Array(event.payload.data));
         }
       });
+      if (cancelled) unsubscribe();
+      else unlisten = unsubscribe;
     })();
 
     return () => {

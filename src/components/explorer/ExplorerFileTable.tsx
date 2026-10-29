@@ -1,3 +1,4 @@
+import { shortcutKey } from "../../hooks/use-keyboard-shortcuts";
 import {
   useState,
   useEffect,
@@ -1252,14 +1253,14 @@ export function ExplorerFileTable({
                       if (selectedIds.size > 0)
                         setConfirmDelete(selectedEntries);
                     }
-                    if (!isInput && (e.metaKey || e.ctrlKey) && e.key === "a") {
+                    if (!isInput && (e.metaKey || e.ctrlKey) && shortcutKey(e) === "a") {
                       e.preventDefault();
                       setSelectedIds(new Set(sortedEntries.map((en) => en.id)));
                     }
                     if (!isInput && caps.canCopyPaste) {
                       if (
                         (e.metaKey || e.ctrlKey) &&
-                        e.key === "c" &&
+                        shortcutKey(e) === "c" &&
                         selectedIds.size > 0
                       ) {
                         e.preventDefault();
@@ -1271,7 +1272,7 @@ export function ExplorerFileTable({
                       }
                       if (
                         (e.metaKey || e.ctrlKey) &&
-                        e.key === "x" &&
+                        shortcutKey(e) === "x" &&
                         selectedIds.size > 0
                       ) {
                         e.preventDefault();
@@ -1283,7 +1284,7 @@ export function ExplorerFileTable({
                       }
                       if (
                         (e.metaKey || e.ctrlKey) &&
-                        e.key === "v" &&
+                        shortcutKey(e) === "v" &&
                         canPaste
                       ) {
                         e.preventDefault();

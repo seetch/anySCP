@@ -1,3 +1,4 @@
+import { shortcutKey } from "../../hooks/use-keyboard-shortcuts";
 import {
   useState,
   useEffect,
@@ -216,7 +217,7 @@ export function SnippetsPage() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+      if ((e.metaKey || e.ctrlKey) && shortcutKey(e) === "f") {
         e.preventDefault();
         searchInputRef.current?.focus();
       }

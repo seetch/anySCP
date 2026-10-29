@@ -66,13 +66,15 @@ AnySCP is a free, open-source desktop application that combines an SSH terminal,
 
 ### 💻 SSH Terminal Client
 
-- Full-featured terminal emulator powered by xterm.js with GPU-accelerated WebGL rendering
+- Full-featured terminal emulator powered by xterm.js
 - Split terminal panes (horizontal and vertical) within a single SSH session
 - In-terminal search with regex support
 - Tabbed SSH sessions with keyboard shortcuts
 - Configurable keep-alive intervals, startup commands, default shell, and proxy jump (bastion host)
 - SSH key authentication with automatic PPK-to-OpenSSH conversion
 - Import connections from `~/.ssh/config`
+
+Keyboard shortcuts follow physical keys across input layouts. While the terminal is focused, Ctrl combinations go to the remote shell rather than application actions, including Docker detach sequences and screen commands. Use Ctrl+Shift+C/V to copy/paste terminal text. On macOS, Cmd shortcuts remain available for application actions.
 
 ### 📁 SFTP File Manager
 
@@ -215,7 +217,7 @@ pnpm tauri build
 | Desktop runtime    | [Tauri v2](https://v2.tauri.app)                   |
 | Backend            | Rust (tokio, russh, russh-sftp, rust-s3, rusqlite) |
 | Frontend           | React 19, TypeScript (strict), Tailwind CSS v4     |
-| Terminal           | xterm.js with WebGL renderer                       |
+| Terminal           | xterm.js                                          |
 | State management   | Zustand                                            |
 | Credential storage | OS keychain via `keyring` crate                    |
 | Database           | SQLite (bundled, zero config)                      |
